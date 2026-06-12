@@ -54,34 +54,54 @@ static void update_keypad_buttons(ui_path_keypad_t *keypad) {
                                 LV_BTNMATRIX_CTRL_DISABLED);
 }
 
-static bool path_is_valid(const ui_path_keypad_t *keypad) {
-  uint32_t components[16];
+static bool parse_path(const ui_path_keypad_t *keypad, uint32_t *components,
+                       size_t components_count, size_t *depth_out) {
   size_t max_depth = keypad->config.max_depth > 0 ? keypad->config.max_depth
                                                   : PATH_KEYPAD_DEFAULT_DEPTH;
-  if (max_depth > sizeof(components) / sizeof(components[0]))
-    max_depth = sizeof(components) / sizeof(components[0]);
-  size_t depth = 0;
-  return bip32_path_parse(keypad->input_buf, components, &depth, max_depth) &&
-         depth >= 1;
+  if (max_depth > components_count)
+    max_depth = components_count;
+  return bip32_path_parse(keypad->input_buf, components, depth_out,
+                          max_depth) &&
+         *depth_out >= 1;
 }
 
-static void submit_path(ui_path_keypad_t *keypad) {
+static void do_submit(ui_path_keypad_t *keypad) {
   ui_path_keypad_t **handle = keypad->handle;
   ui_path_keypad_submit_cb cb = keypad->config.submit_cb;
   void *user_data = keypad->config.user_data;
-  const char *invalid_message = keypad->config.invalid_message;
-
-  if (!path_is_valid(keypad)) {
-    if (invalid_message)
-      dialog_show_error_timeout(invalid_message, NULL, 0);
-    return;
-  }
 
   char path[sizeof(keypad->input_buf)];
   strcpy(path, keypad->input_buf);
   ui_path_keypad_close(handle);
   if (cb)
     cb(path, user_data);
+}
+
+static void unhardened_confirm_cb(bool confirmed, void *user_data) {
+  ui_path_keypad_t *keypad = user_data;
+  if (confirmed)
+    do_submit(keypad);
+}
+
+static void submit_path(ui_path_keypad_t *keypad) {
+  uint32_t components[16];
+  size_t depth = 0;
+  if (!parse_path(keypad, components,
+                  sizeof(components) / sizeof(components[0]), &depth)) {
+    if (keypad->config.invalid_message)
+      dialog_show_error_timeout(keypad->config.invalid_message, NULL, 0);
+    return;
+  }
+
+  for (size_t i = 0; i < depth; i++) {
+    if (!bip32_path_is_hardened(components[i])) {
+      dialog_show_confirm("Path has unhardened nodes.\nProceed anyway?",
+                          unhardened_confirm_cb, keypad, DIALOG_STYLE_OVERLAY);
+      return;
+    }
+  }
+
+  do_submit(keypad);
 }
 
 static void cancel_keypad(ui_path_keypad_t *keypad) {
