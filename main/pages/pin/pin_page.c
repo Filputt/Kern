@@ -884,6 +884,15 @@ static void build_setup_words_state(void) {
 // Delay countdown
 // ---------------------------------------------------------------------------
 
+static void format_delay(char *buf, size_t len, uint32_t sec) {
+  if (sec >= 3600)
+    snprintf(buf, len, "%uh %02um", sec / 3600, (sec % 3600) / 60);
+  else if (sec >= 60)
+    snprintf(buf, len, "%um %02us", sec / 60, sec % 60);
+  else
+    snprintf(buf, len, "%us", sec);
+}
+
 static void delay_timer_cb(lv_timer_t *timer) {
   (void)timer;
   if (delay_remaining_sec == 0) {
@@ -895,7 +904,7 @@ static void delay_timer_cb(lv_timer_t *timer) {
   delay_remaining_sec--;
   if (delay_label) {
     char buf[16];
-    snprintf(buf, sizeof(buf), "%lus", (unsigned long)delay_remaining_sec);
+    format_delay(buf, sizeof(buf), delay_remaining_sec);
     lv_label_set_text(delay_label, buf);
   }
   if (delay_arc)
@@ -917,43 +926,35 @@ static void build_delay_state(void) {
   uint8_t fail = pin_get_fail_count();
   uint8_t max = pin_get_max_failures();
 
+  // Arc size: 1/3 of screen width scales correctly across all boards
+  int32_t arc_size = theme_screen_width() / 3;
+
   // Countdown arc — depletes clockwise over the delay period
   delay_arc = lv_arc_create(content_area);
   lv_arc_set_range(delay_arc, 0, (int32_t)delay_remaining_sec);
   lv_arc_set_value(delay_arc, (int32_t)delay_remaining_sec);
   lv_arc_set_bg_angles(delay_arc, 0, 360);
   lv_arc_set_mode(delay_arc, LV_ARC_MODE_REVERSE);
-  lv_obj_set_size(delay_arc, 120, 120);
-  lv_obj_set_style_arc_color(delay_arc, error_color(), LV_PART_INDICATOR);
+  lv_obj_set_size(delay_arc, arc_size, arc_size);
+  lv_color_t arc_color = (fail * 2 >= max) ? error_color() : highlight_color();
+  lv_obj_set_style_arc_color(delay_arc, arc_color, LV_PART_INDICATOR);
   lv_obj_clear_flag(delay_arc, LV_OBJ_FLAG_CLICKABLE);
 
-  // Seconds label centered inside the arc
+  // Countdown label centered inside the arc
   delay_label = lv_label_create(delay_arc);
   char buf[16];
-  snprintf(buf, sizeof(buf), "%lus", (unsigned long)delay_remaining_sec);
+  format_delay(buf, sizeof(buf), delay_remaining_sec);
   lv_label_set_text(delay_label, buf);
   lv_obj_set_style_text_font(delay_label, theme_font_medium(), 0);
   lv_obj_set_style_text_color(delay_label, primary_color(), 0);
   lv_obj_center(delay_label);
 
-  // Attempt severity dots — consumed dots turn red
-  lv_obj_t *dots_row = lv_obj_create(content_area);
-  lv_obj_remove_style_all(dots_row);
-  lv_obj_set_flex_flow(dots_row, LV_FLEX_FLOW_ROW);
-  lv_obj_set_flex_align(dots_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
-                        LV_FLEX_ALIGN_CENTER);
-  lv_obj_set_style_pad_gap(dots_row, 8, 0);
-  lv_obj_set_size(dots_row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-
-  for (uint8_t i = 0; i < max; i++) {
-    lv_obj_t *dot = lv_obj_create(dots_row);
-    lv_obj_set_size(dot, 12, 12);
-    lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_border_width(dot, 0, 0);
-    lv_color_t c = (i < fail) ? error_color() : secondary_color();
-    lv_obj_set_style_bg_color(dot, c, 0);
-    lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
-  }
+  // Attempt severity bar — fills with error_color as attempts are consumed
+  lv_obj_t *bar = lv_bar_create(content_area);
+  lv_bar_set_range(bar, 0, max);
+  lv_bar_set_value(bar, fail, LV_ANIM_OFF);
+  lv_obj_set_size(bar, LV_PCT(80), 12);
+  lv_obj_set_style_bg_color(bar, error_color(), LV_PART_INDICATOR);
 
   delay_timer = lv_timer_create(delay_timer_cb, 1000, NULL);
 }
