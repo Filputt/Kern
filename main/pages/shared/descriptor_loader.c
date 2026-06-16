@@ -355,9 +355,30 @@ static lv_color_t policy_token_color(const ms_token_t *tok,
   }
 }
 
-// Draw one continuous vertical indent guide per nesting run, under the text.
-// Each child spangroup's level is recovered from its left padding.
-static void policy_guides_draw_cb(lv_event_t *e) {
+// Recover a child spangroup's nesting level from its left padding.
+static int32_t policy_line_level(lv_obj_t *child, int32_t indent_px) {
+  return lv_obj_get_style_pad_left(child, 0) / indent_px;
+}
+
+// Scanning forward from line i, is there another line at exactly `depth` before
+// a shallower line closes the branch? (i.e. does this branch have more
+// siblings, so its spine should keep descending).
+static bool policy_branch_continues(lv_obj_t *cont, uint32_t n, uint32_t i,
+                                    int32_t depth, int32_t indent_px) {
+  for (uint32_t j = i + 1; j < n; j++) {
+    int32_t lj = policy_line_level(lv_obj_get_child(cont, j), indent_px);
+    if (lj < depth)
+      return false;
+    if (lj == depth)
+      return true;
+  }
+  return false;
+}
+
+// Draw a file-tree style guide: a vertical spine per nesting branch with an
+// elbow joining each line to its parent (tee while siblings remain, corner on
+// the last one). Each child spangroup's level is recovered from its padding.
+static void policy_tree_draw_cb(lv_event_t *e) {
   lv_obj_t *cont = lv_event_get_target(e);
   lv_layer_t *layer = lv_event_get_layer(e);
   int32_t indent_px = (int32_t)(intptr_t)lv_event_get_user_data(e);
@@ -367,46 +388,56 @@ static void policy_guides_draw_cb(lv_event_t *e) {
   int32_t guide_px = theme_small_padding() / 4;
   if (guide_px < 1)
     guide_px = 1;
+  int32_t inset = indent_px / 4;
+  if (inset < 2)
+    inset = 2;
+  int32_t gap = lv_obj_get_style_pad_row(cont, 0);
+
   lv_draw_line_dsc_t dsc;
   lv_draw_line_dsc_init(&dsc);
   dsc.color = secondary_color();
   dsc.width = guide_px;
-  dsc.opa = LV_OPA_40;
+  dsc.opa = LV_OPA_50;
 
   lv_area_t content;
   lv_obj_get_content_coords(cont, &content);
   int32_t x0 = content.x1;
-  uint32_t child_count = lv_obj_get_child_count(cont);
-  for (int32_t l = 0;; l++) {
-    bool level_exists = false;
-    bool in_run = false;
-    int32_t run_y1 = 0, run_y2 = 0;
-    for (uint32_t i = 0; i < child_count; i++) {
-      lv_obj_t *child = lv_obj_get_child(cont, i);
-      lv_area_t child_area;
-      lv_obj_get_coords(child, &child_area);
-      bool deeper = lv_obj_get_style_pad_left(child, 0) / indent_px > l;
-      if (deeper) {
-        level_exists = true;
-        if (!in_run) {
-          in_run = true;
-          run_y1 = child_area.y1;
-        }
-        run_y2 = child_area.y2;
-      } else {
-        in_run = false;
-      }
-      if ((!deeper || i == child_count - 1) && run_y2 > run_y1) {
-        dsc.p1.x = x0 + l * indent_px;
-        dsc.p1.y = run_y1;
-        dsc.p2.x = dsc.p1.x;
-        dsc.p2.y = run_y2;
-        lv_draw_line(layer, &dsc);
-        run_y1 = run_y2 = 0;
-      }
+  uint32_t n = lv_obj_get_child_count(cont);
+
+  for (uint32_t i = 0; i < n; i++) {
+    lv_obj_t *child = lv_obj_get_child(cont, i);
+    int32_t level = policy_line_level(child, indent_px);
+    if (level <= 0)
+      continue;
+
+    lv_area_t a;
+    lv_obj_get_coords(child, &a);
+    int32_t mid = (a.y1 + a.y2) / 2;
+    int32_t top = a.y1 - gap; // bridge the inter-row gap up to the parent
+
+    // Ancestor branches still expecting siblings get a pass-through spine.
+    for (int32_t d = 1; d < level; d++) {
+      if (!policy_branch_continues(cont, n, i, d, indent_px))
+        continue;
+      int32_t x = x0 + (d - 1) * indent_px + inset;
+      dsc.p1.x = dsc.p2.x = x;
+      dsc.p1.y = top;
+      dsc.p2.y = a.y2;
+      lv_draw_line(layer, &dsc);
     }
-    if (!level_exists)
-      break;
+
+    // This line's own branch: spine down to the elbow, then across to the text.
+    int32_t x = x0 + (level - 1) * indent_px + inset;
+    bool last = !policy_branch_continues(cont, n, i, level, indent_px);
+    dsc.p1.x = dsc.p2.x = x;
+    dsc.p1.y = top;
+    dsc.p2.y = last ? mid : a.y2;
+    lv_draw_line(layer, &dsc);
+
+    dsc.p1.x = x;
+    dsc.p1.y = dsc.p2.y = mid;
+    dsc.p2.x = x0 + level * indent_px;
+    lv_draw_line(layer, &dsc);
   }
 }
 
@@ -437,7 +468,7 @@ lv_obj_t *descriptor_policy_view_create(lv_obj_t *parent, const char *policy,
   lv_obj_clear_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
 
   int32_t indent_px = theme_default_padding() / 2;
-  lv_obj_add_event_cb(cont, policy_guides_draw_cb, LV_EVENT_DRAW_MAIN,
+  lv_obj_add_event_cb(cont, policy_tree_draw_cb, LV_EVENT_DRAW_MAIN,
                       (void *)(intptr_t)indent_px);
 
   for (size_t i = 0; i < view.num_lines; i++) {
