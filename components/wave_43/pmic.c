@@ -41,7 +41,7 @@ static esp_err_t map_gpio_to_channel(gpio_num_t gpio, adc_unit_t unit,
                                      adc_channel_t *ch) {
   if (!ch)
     return ESP_ERR_INVALID_ARG;
-  esp_err_t err = adc_oneshot_io_to_channel(gpio, unit, ch);
+  esp_err_t err = adc_oneshot_io_to_channel(gpio, &unit, ch);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "GPIO%d is not valid ADC input for unit %d", gpio,
              (int)unit);
