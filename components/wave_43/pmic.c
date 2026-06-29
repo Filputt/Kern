@@ -1,6 +1,8 @@
 #include "bsp/pmic.h"
 
 #include "driver/gpio.h"
+#include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_check.h"
 #include "esp_err.h"
@@ -11,22 +13,28 @@
 static const char *TAG = "wave_43_pmic";
 
 /* Waveshare ESP32-P4 4.3":
- * - Battery divider: R12=200k (top), R15=100k (bottom), node on GPIO22
+ * - Battery divider: R12=200k (top), R15=100k (bottom), node on GPIO20
  * - Divider ratio: Vadc = Vbat * (100k / (200k + 100k)) = Vbat / 3
+ *
+ * Note: the divider is routed to GPIO20, not GPIO22 (confirmed empirically
+ * by scanning all ADC1-capable pins).
  */
-#define BAT_ADC_GPIO GPIO_NUM_22
+#define BAT_ADC_GPIO GPIO_NUM_20
 #define BAT_ADC_UNIT ADC_UNIT_1
 #define BAT_ADC_ATTEN ADC_ATTEN_DB_12
 #define BAT_ADC_BITWIDTH ADC_BITWIDTH_12
 #define BAT_ADC_MAX_RAW 4095.0f
 
-/* ESP32-P4 ADC full-scale used here: 0..3.3V */
 #define ADC_VREF_MV 3300.0f
 #define BAT_DIVIDER_MULTIPLIER 3.0f
 
 /* Battery percentage mapping */
 #define BAT_EMPTY_MV 3000
 #define BAT_FULL_MV 4200
+
+/* Number of ADC samples to average per reading. Helps smooth out voltage
+ * ripples caused by LCD backlight PWM and Wi-Fi transmit bursts. */
+#define BAT_ADC_SAMPLE_COUNT 32
 
 /* Optional charger status pins (unknown on this board variant). */
 #define CHG_STAT_GPIO GPIO_NUM_NC
@@ -35,6 +43,7 @@ static const char *TAG = "wave_43_pmic";
 static bool s_pmic_available = false;
 static bool s_initialized = false;
 static adc_oneshot_unit_handle_t s_adc_handle = NULL;
+static adc_cali_handle_t s_adc_cali_handle = NULL;
 static adc_channel_t s_adc_channel = ADC_CHANNEL_0;
 
 static esp_err_t map_gpio_to_channel(gpio_num_t gpio, adc_unit_t unit,
@@ -50,30 +59,57 @@ static esp_err_t map_gpio_to_channel(gpio_num_t gpio, adc_unit_t unit,
   return ESP_OK;
 }
 
+static esp_err_t read_adc_pin_mv(int *mv) {
+  if (!mv)
+    return ESP_ERR_INVALID_ARG;
+  if (!s_initialized || !s_adc_handle || !s_adc_cali_handle)
+    return ESP_ERR_INVALID_STATE;
+
+  int64_t sum_mv = 0;
+  for (int i = 0; i < BAT_ADC_SAMPLE_COUNT; i++) {
+    int raw = 0;
+    ESP_RETURN_ON_ERROR(
+        adc_oneshot_read(s_adc_handle, s_adc_channel, &raw), TAG,
+        "adc read failed");
+
+    if (raw < 0)
+      raw = 0;
+    if (raw > (int)BAT_ADC_MAX_RAW)
+      raw = (int)BAT_ADC_MAX_RAW;
+
+    int sample_mv = 0;
+    ESP_RETURN_ON_ERROR(
+        adc_cali_raw_to_voltage(s_adc_cali_handle, raw, &sample_mv), TAG,
+        "adc calibration failed");
+    sum_mv += sample_mv;
+  }
+
+  *mv = (int)(sum_mv / BAT_ADC_SAMPLE_COUNT);
+  return ESP_OK;
+}
+
 static esp_err_t read_battery_mv(uint16_t *mv) {
   if (!mv)
     return ESP_ERR_INVALID_ARG;
   if (!s_initialized || !s_adc_handle)
     return ESP_ERR_INVALID_STATE;
 
-  int raw = 0;
-  ESP_RETURN_ON_ERROR(adc_oneshot_read(s_adc_handle, s_adc_channel, &raw), TAG,
-                      "adc read failed");
+  int vadc_mv = 0;
+  ESP_RETURN_ON_ERROR(read_adc_pin_mv(&vadc_mv), TAG,
+                      "read adc pin voltage failed");
 
-  if (raw < 0)
-    raw = 0;
-  if (raw > (int)BAT_ADC_MAX_RAW)
-    raw = (int)BAT_ADC_MAX_RAW;
-
-  float vadc_mv = ((float)raw * ADC_VREF_MV) / BAT_ADC_MAX_RAW;
-  float vbat_mv = vadc_mv * BAT_DIVIDER_MULTIPLIER;
+  float vbat_mv = (float)vadc_mv * BAT_DIVIDER_MULTIPLIER;
 
   if (vbat_mv < 0)
     vbat_mv = 0;
   if (vbat_mv > 65535.0f)
     vbat_mv = 65535.0f;
 
-  *mv = (uint16_t)(vbat_mv + 0.5f);
+  uint16_t vbat = (uint16_t)(vbat_mv + 0.5f);
+
+  ESP_LOGI(TAG, "battery: Vadc=%dmV, Vbat=%dmV", vadc_mv, vbat);
+
+  *mv = vbat;
   return ESP_OK;
 }
 
@@ -96,6 +132,15 @@ esp_err_t bsp_pmic_init(void) {
   ESP_RETURN_ON_ERROR(
       adc_oneshot_config_channel(s_adc_handle, s_adc_channel, &chan_cfg), TAG,
       "adc channel config failed");
+
+  adc_cali_curve_fitting_config_t cali_cfg = {
+      .unit_id = BAT_ADC_UNIT,
+      .atten = BAT_ADC_ATTEN,
+      .bitwidth = BAT_ADC_BITWIDTH,
+  };
+  ESP_RETURN_ON_ERROR(
+      adc_cali_create_scheme_curve_fitting(&cali_cfg, &s_adc_cali_handle), TAG,
+      "adc calibration create failed");
 
 #if CHG_STAT_GPIO != GPIO_NUM_NC
   gpio_config_t chg_cfg = {
