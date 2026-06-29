@@ -105,11 +105,7 @@ static esp_err_t read_battery_mv(uint16_t *mv) {
   if (vbat_mv > 65535.0f)
     vbat_mv = 65535.0f;
 
-  uint16_t vbat = (uint16_t)(vbat_mv + 0.5f);
-
-  ESP_LOGI(TAG, "battery: Vadc=%dmV, Vbat=%dmV", vadc_mv, vbat);
-
-  *mv = vbat;
+  *mv = (uint16_t)(vbat_mv + 0.5f);
   return ESP_OK;
 }
 
