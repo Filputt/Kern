@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.0.12] - 2026-07-03
+
+### Added
+- Taproot miniscript: tr() script-path descriptors accepted at load, with the internal (key-path) key classified as ours / NUMS / external and unprovable internal keys rejected
+- Taproot script type in the miniscript wallet export, seeding the BIP48-style 3h path
+- Mnemonic entry by BIP39 word numbers (1-2048) alongside direct word input
+- Backup QR view modes: Standard, Regions, and Zoomed (magnified region with row/column labels) to aid hand-transcription
+- Mnemonic backup word list with color-coded numbered rows for easier transcription
+- Multicolor variant for the Waveshare 4.3" enclosure
+
+### Changed
+- SD card: descriptor load now browses the whole card with a shared file browser (KEF detected by content); mounting reuses a live mount and retries at lower speed to fix spurious "No SD card" failures
+- Updated to ESP-IDF 6.0.2, LVGL 9.5, and latest managed components;
+- libwally-core submodule pinned to custom fork; bumped to 1.5.4 + custom taproot and musig2 experimental support
+- Build with standard libsecp256k1: MuSig2 and anti-exfil layers compiled out (schnorr/BIP341 unaffected)
+- Per-board font sizes derived from a sublinear curve so larger panels show proportionally more content
+- PSBT signing cache enabled, avoiding O(n^2) sighash work on many-input transactions
+- Secure-boot guide migrated to RSA-3072 with three-key rotation (ECDSA Secure Boot v2 is non-functional on ESP32-P4); lockdown roadmap reordered to match the safe eFuse burn order
+
+
 ## [0.0.11] - 2026-06-16
 
 ### Added

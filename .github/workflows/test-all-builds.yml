@@ -9,7 +9,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    container: espressif/idf:v6.0.1
+    container: espressif/idf:v6.0.2
     strategy:
       fail-fast: false
       matrix:
@@ -94,6 +94,9 @@ jobs:
       uses: actions/upload-pages-artifact@v3
       with:
         path: flasher/
+        name: github-pages-${{ github.run_attempt }}
     - name: Deploy to GitHub Pages
       id: deployment
       uses: actions/deploy-pages@v4
+      with:
+        artifact_name: github-pages-${{ github.run_attempt }}
