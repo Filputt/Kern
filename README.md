@@ -106,7 +106,7 @@ idf.py -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.crowpanel' b
 The simulator renders the full LVGL UI in an SDL2 window, matching each board's resolution:
 
 ```bash
-just sim                # Run simulator as wave_4b (720x720)
+just sim                # Run simulator as wave_4b (720x720) with webcam (V4L2)
 just sim wave_35        # Run simulator as wave_35 (320x480)
 just sim wave_5         # Run simulator as wave_5 (720x1280)
 just sim wave_43        # Run simulator as wave_43 (480x800)
@@ -115,7 +115,7 @@ just sim-build wave_35  # Build only
 just sim-clean          # Remove simulator build artifacts
 just sim-reset          # Wipe simulator data (factory reset)
 just sim-qr IMG         # Run with a QR image
-just sim-webcam         # Run with real webcam (V4L2)
+just sim-no-cam         # Run without camera
 ```
 
 Switching simulator boards also requires `just sim-clean` first. See [simulator/README.md](simulator/README.md) for details.

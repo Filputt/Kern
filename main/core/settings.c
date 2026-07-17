@@ -13,9 +13,14 @@ static const char *KEY_NETWORK = "def_net";
 static const char *KEY_BRIGHTNESS = "bright";
 static const char *KEY_AE_TARGET = "ae_tgt";
 static const char *KEY_FOCUS_POS = "focus";
+static const char *KEY_QR_DENSITY = "qr_dens";
+static const char *KEY_QR_SHADE = "qr_shade";
+static const char *KEY_QR_FPS = "qr_fps";
 static const char *KEY_PERMISSIVE_SIGNING = "perm_sign";
 static const char *KEY_PARTIAL_SIGNING = "part_sign";
 static const char *KEY_EXPECTED_OWNED_SIGNING = "exp_own_sign";
+static const char *KEY_SCREENSAVER = "scrn_svr";
+static const char *KEY_SESSION_TIMEOUT = "sess_tout";
 
 static nvs_handle_t settings_nvs;
 static bool initialized = false;
@@ -92,6 +97,13 @@ esp_err_t settings_init(void) {
   return ESP_OK;
 }
 
+void settings_deinit(void) {
+  if (!initialized)
+    return;
+  nvs_close(settings_nvs);
+  initialized = false;
+}
+
 wallet_network_t settings_get_network(void) {
   uint8_t val = settings_get_u8_or_default(KEY_NETWORK, WALLET_NETWORK_MAINNET);
   return (val <= WALLET_NETWORK_TESTNET) ? (wallet_network_t)val
@@ -104,10 +116,12 @@ esp_err_t settings_set_network(wallet_network_t network) {
 
 uint8_t settings_get_brightness(void) {
   uint8_t val = settings_get_u8_or_default(KEY_BRIGHTNESS, 50);
-  return (val <= 100) ? val : 50;
+  return (val >= BRIGHTNESS_MIN && val <= 100) ? val : 50;
 }
 
 esp_err_t settings_set_brightness(uint8_t brightness) {
+  if (brightness < BRIGHTNESS_MIN)
+    brightness = BRIGHTNESS_MIN;
   if (brightness > 100)
     brightness = 100;
   return settings_set_u8_and_commit(KEY_BRIGHTNESS, brightness);
@@ -139,6 +153,47 @@ esp_err_t settings_set_focus_position(uint16_t position) {
   return settings_set_u16_and_commit(KEY_FOCUS_POS, position);
 }
 
+uint16_t settings_get_qr_density(void) {
+  uint16_t val =
+      settings_get_u16_or_default(KEY_QR_DENSITY, QR_DENSITY_DEFAULT);
+  return (val >= QR_DENSITY_MIN && val <= QR_DENSITY_MAX) ? val
+                                                          : QR_DENSITY_DEFAULT;
+}
+
+esp_err_t settings_set_qr_density(uint16_t chars_per_frame) {
+  if (chars_per_frame < QR_DENSITY_MIN)
+    chars_per_frame = QR_DENSITY_MIN;
+  if (chars_per_frame > QR_DENSITY_MAX)
+    chars_per_frame = QR_DENSITY_MAX;
+  return settings_set_u16_and_commit(KEY_QR_DENSITY, chars_per_frame);
+}
+
+uint8_t settings_get_qr_shade(void) {
+  uint8_t val = settings_get_u8_or_default(KEY_QR_SHADE, QR_SHADE_DEFAULT);
+  return (val >= QR_SHADE_MIN && val <= QR_SHADE_MAX) ? val : QR_SHADE_DEFAULT;
+}
+
+esp_err_t settings_set_qr_shade(uint8_t shade) {
+  if (shade < QR_SHADE_MIN)
+    shade = QR_SHADE_MIN;
+  if (shade > QR_SHADE_MAX)
+    shade = QR_SHADE_MAX;
+  return settings_set_u8_and_commit(KEY_QR_SHADE, shade);
+}
+
+uint8_t settings_get_qr_fps(void) {
+  uint8_t val = settings_get_u8_or_default(KEY_QR_FPS, QR_FPS_DEFAULT);
+  return (val >= QR_FPS_MIN && val <= QR_FPS_MAX) ? val : QR_FPS_DEFAULT;
+}
+
+esp_err_t settings_set_qr_fps(uint8_t fps) {
+  if (fps < QR_FPS_MIN)
+    fps = QR_FPS_MIN;
+  if (fps > QR_FPS_MAX)
+    fps = QR_FPS_MAX;
+  return settings_set_u8_and_commit(KEY_QR_FPS, fps);
+}
+
 bool settings_get_permissive_signing(void) {
   return settings_get_bool_or_default(KEY_PERMISSIVE_SIGNING, false);
 }
@@ -161,6 +216,24 @@ bool settings_get_expected_owned_signing(void) {
 
 esp_err_t settings_set_expected_owned_signing(bool enabled) {
   return settings_set_bool_and_commit(KEY_EXPECTED_OWNED_SIGNING, enabled);
+}
+
+uint16_t settings_get_screensaver_timeout(void) {
+  return settings_get_u16_or_default(KEY_SCREENSAVER,
+                                     SCREENSAVER_TIMEOUT_DEFAULT_SEC);
+}
+
+esp_err_t settings_set_screensaver_timeout(uint16_t sec) {
+  return settings_set_u16_and_commit(KEY_SCREENSAVER, sec);
+}
+
+uint16_t settings_get_session_timeout(void) {
+  return settings_get_u16_or_default(KEY_SESSION_TIMEOUT,
+                                     SESSION_TIMEOUT_DEFAULT_SEC);
+}
+
+esp_err_t settings_set_session_timeout(uint16_t sec) {
+  return settings_set_u16_and_commit(KEY_SESSION_TIMEOUT, sec);
 }
 
 esp_err_t settings_reset_all(void) {

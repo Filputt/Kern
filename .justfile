@@ -6,18 +6,24 @@ export IDF_PATH_FORCE := "1"
 # Each board builds into its own build_<board>/ directory, so switching
 # boards is instant (no clean required) and per-board builds stay incremental.
 
-build board="wave_4b":
+boards := "wave_4b wave_35 wave_5 wave_43 crowpanel"
+
+_check_board board:
+    #!/usr/bin/env sh
+    case " {{boards}} " in *" {{board}} "*) ;; *) echo "error: unknown board '{{board}}' (valid: {{boards}})" >&2; exit 1;; esac
+
+build board="wave_4b": (_check_board board)
     #!/usr/bin/env sh
     command -v idf.py >/dev/null || . $IDF_PATH/export.sh
     idf.py -B build_{{board}} -D SDKCONFIG=build_{{board}}/sdkconfig -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.{{board}}' build
     cp ./build_{{board}}/compile_commands.json ./compile_commands.json
 
-flash board="wave_4b":
+flash board="wave_4b": (_check_board board)
     #!/usr/bin/env sh
     command -v idf.py >/dev/null || . $IDF_PATH/export.sh
     idf.py -B build_{{board}} -D SDKCONFIG=build_{{board}}/sdkconfig -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.{{board}}' flash
 
-monitor board="wave_4b":
+monitor board="wave_4b": (_check_board board)
     #!/usr/bin/env sh
     command -v idf.py >/dev/null || . $IDF_PATH/export.sh
     idf.py -B build_{{board}} -D SDKCONFIG=build_{{board}}/sdkconfig monitor
@@ -48,16 +54,20 @@ _sim_v_res board:
     case "{{board}}" in wave_35) echo 480;; wave_5) echo 1280;; wave_43) echo 800;; crowpanel) echo 600;; *) echo 720;; esac
 
 # Build the desktop simulator
-sim-build board="wave_4b":
+sim-build board="wave_4b": (_check_board board)
     cd simulator && cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug \
         -DSIM_BOARD={{board}} \
         -DSIM_LCD_H_RES=$(just _sim_h_res {{board}}) \
         -DSIM_LCD_V_RES=$(just _sim_v_res {{board}}) \
         && cmake --build build -- -j$(nproc)
 
-# Run the desktop simulator
+# Run the desktop simulator with webcam
 # SDL env vars: software renderer for compatibility with ssh -X
-sim board="wave_4b": (sim-build board)
+sim board="wave_4b": (sim-build-webcam board)
+    SDL_VIDEODRIVER=x11 SDL_RENDER_DRIVER=software ./simulator/build/kern_simulator --webcam
+
+# Run the desktop simulator without camera
+sim-no-cam board="wave_4b": (sim-build board)
     SDL_VIDEODRIVER=x11 SDL_RENDER_DRIVER=software ./simulator/build/kern_simulator
 
 # Clean simulator build artifacts
@@ -73,16 +83,12 @@ sim-qr IMAGE board="wave_4b": (sim-build board)
     SDL_VIDEODRIVER=x11 SDL_RENDER_DRIVER=software ./simulator/build/kern_simulator --qr-image {{IMAGE}}
 
 # Build simulator with webcam support (V4L2)
-sim-build-webcam board="wave_4b":
+sim-build-webcam board="wave_4b": (_check_board board)
     cd simulator && cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug -DSIM_WEBCAM=ON \
         -DSIM_BOARD={{board}} \
         -DSIM_LCD_H_RES=$(just _sim_h_res {{board}}) \
         -DSIM_LCD_V_RES=$(just _sim_v_res {{board}}) \
         && cmake --build build -- -j$(nproc)
-
-# Run simulator with webcam (builds with V4L2 support)
-sim-webcam board="wave_4b": (sim-build-webcam board)
-    SDL_VIDEODRIVER=x11 SDL_RENDER_DRIVER=software ./simulator/build/kern_simulator --webcam
 
 # update subrepo dependencies
 dep:

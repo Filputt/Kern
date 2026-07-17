@@ -29,11 +29,14 @@ typedef struct {
   uint32_t coin;    // 0 or 1 (unhardened)
   uint32_t account; // 0..SS_MAX_ACCOUNT (unhardened)
   uint32_t chain;   // 0 or 1 (unhardened)
-  uint32_t index;   // < SS_MAX_ADDR_INDEX (unhardened)
+  uint32_t index;   // < caller-chosen max_index (unhardened)
 } ss_keypath_t;
 
 #define SS_MAX_ACCOUNT 100
-#define SS_MAX_ADDR_INDEX 100
+/* Output-only cap: change beyond any gap limit is ours but unrecoverable.
+ * Inputs already exist on-chain, so they pass SS_ADDR_INDEX_UNCAPPED. */
+#define SS_MAX_OUT_ADDR_INDEX 200
+#define SS_ADDR_INDEX_UNCAPPED UINT32_MAX
 
 #define MAX_KEYPATH_ORIGIN_DEPTH 6
 #define MAX_KEYPATH_TAIL_DEPTH 2
@@ -66,7 +69,8 @@ bool ss_keypath_parse(const unsigned char *keypath_after_fp,
 
 bool ss_keypath_format(const ss_keypath_t *kp, char *buf, size_t buf_size);
 
-bool ss_keypath_is_whitelisted(const ss_keypath_t *kp, bool is_testnet);
+bool ss_keypath_is_whitelisted(const ss_keypath_t *kp, bool is_testnet,
+                               uint32_t max_index);
 
 bool ss_scriptpubkey(ss_script_type_t script, uint32_t account, uint32_t chain,
                      uint32_t index, bool is_testnet, uint8_t *out,

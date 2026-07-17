@@ -23,7 +23,6 @@ static const char *KEY_PIN_HASH = "pin_hash";
 static const char *KEY_SPLIT_POS = "split_pos";
 static const char *KEY_FAIL_CNT = "fail_cnt";
 static const char *KEY_MAX_FAIL = "max_fail";
-static const char *KEY_TIMEOUT = "timeout";
 static const char *KEY_HAS_EFUSE = "has_efuse";
 
 // Salt derivation tags
@@ -75,6 +74,13 @@ esp_err_t pin_init(void) {
   }
   initialized = true;
   return ESP_OK;
+}
+
+void pin_deinit(void) {
+  if (!initialized)
+    return;
+  nvs_close(pin_nvs);
+  initialized = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -245,13 +251,10 @@ esp_err_t pin_setup(const char *pin, size_t len, uint8_t split_pos) {
   // Reset failure count
   nvs_set_u8(pin_nvs, KEY_FAIL_CNT, 0);
 
-  // Set defaults for max_fail and timeout if not already configured
+  // Set default for max_fail if not already configured
   uint8_t tmp8;
   if (nvs_get_u8(pin_nvs, KEY_MAX_FAIL, &tmp8) != ESP_OK)
     nvs_set_u8(pin_nvs, KEY_MAX_FAIL, PIN_DEFAULT_MAX_FAILURES);
-  uint16_t tmp16;
-  if (nvs_get_u16(pin_nvs, KEY_TIMEOUT, &tmp16) != ESP_OK)
-    nvs_set_u16(pin_nvs, KEY_TIMEOUT, PIN_DEFAULT_TIMEOUT_SEC);
 
   // Record eFuse availability
   uint8_t has_efuse = (pin_efuse_check() == PIN_EFUSE_PROVISIONED) ? 1 : 0;
@@ -336,11 +339,6 @@ pin_verify_result_t pin_verify(const char *pin, size_t len) {
   return PIN_VERIFY_DELAY;
 }
 
-esp_err_t pin_change(const char *new_pin, size_t len, uint8_t split_pos) {
-  // Caller must verify old PIN first via pin_verify()
-  return pin_setup(new_pin, len, split_pos);
-}
-
 esp_err_t pin_remove(void) {
   if (!initialized)
     return ESP_ERR_INVALID_STATE;
@@ -396,23 +394,6 @@ bool pin_has_anti_phishing(void) {
   uint8_t val = 0;
   nvs_get_u8(pin_nvs, KEY_HAS_EFUSE, &val);
   return val != 0;
-}
-
-uint16_t pin_get_session_timeout(void) {
-  if (!initialized)
-    return PIN_DEFAULT_TIMEOUT_SEC;
-  uint16_t val = PIN_DEFAULT_TIMEOUT_SEC;
-  nvs_get_u16(pin_nvs, KEY_TIMEOUT, &val);
-  return val;
-}
-
-esp_err_t pin_set_session_timeout(uint16_t sec) {
-  if (!initialized)
-    return ESP_ERR_INVALID_STATE;
-  esp_err_t err = nvs_set_u16(pin_nvs, KEY_TIMEOUT, sec);
-  if (err != ESP_OK)
-    return err;
-  return nvs_commit(pin_nvs);
 }
 
 esp_err_t pin_set_max_failures(uint8_t max) {

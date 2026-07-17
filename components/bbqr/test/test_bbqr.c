@@ -1,8 +1,6 @@
 /*
  * BBQr Test Suite
- * Compile with: gcc -o test_bbqr test_bbqr.c ../src/base32.c ../src/miniz.c
- * ../src/bbqr.c -I../src -lz Or without system zlib: gcc -o test_bbqr
- * test_bbqr.c ../src/base32.c ../src/miniz.c ../src/bbqr.c -I../src
+ * Compile with: make run-bbqr (see Makefile)
  */
 
 #include <assert.h>
@@ -13,7 +11,6 @@
 #include "base32.h"
 #include "bbqr.h"
 #include "bbqr_samples.h"
-#include "miniz.h"
 
 static int tests_passed = 0;
 static int tests_failed = 0;
@@ -184,49 +181,6 @@ void test_bbqr_parse_header(void) {
   PASS();
 }
 
-/* Test miniz compression/decompression round-trip */
-void test_miniz_roundtrip(void) {
-  TEST("miniz compress/decompress round-trip");
-
-  const char *original = "Hello, this is a test string for compression. "
-                         "It should compress reasonably well because it has "
-                         "some repetition. Hello hello hello!";
-  size_t original_len = strlen(original);
-
-  /* Compress */
-  size_t compressed_len = 0;
-  uint8_t *compressed =
-      mz_compress_alloc((const uint8_t *)original, original_len,
-                        &compressed_len, MZ_DEFAULT_COMPRESSION);
-  if (!compressed) {
-    FAIL("Compression failed");
-    return;
-  }
-
-  printf("(compressed %zu -> %zu bytes) ", original_len, compressed_len);
-
-  /* Decompress */
-  size_t decompressed_len = 0;
-  uint8_t *decompressed =
-      mz_uncompress_alloc(compressed, compressed_len, &decompressed_len);
-  free(compressed);
-
-  if (!decompressed) {
-    FAIL("Decompression failed");
-    return;
-  }
-
-  if (decompressed_len != original_len ||
-      memcmp(original, decompressed, original_len) != 0) {
-    free(decompressed);
-    FAIL("Data mismatch");
-    return;
-  }
-
-  free(decompressed);
-  PASS();
-}
-
 /* Test BBQr encode/decode round-trip */
 void test_bbqr_roundtrip(void) {
   TEST("bbqr encode/decode round-trip");
@@ -270,6 +224,142 @@ void test_bbqr_roundtrip(void) {
   }
 
   free(decoded);
+  PASS();
+}
+
+/* Test BBQr output remains in QR alphanumeric mode without Base32 padding. */
+void test_bbqr_unpadded_base32(void) {
+  TEST("bbqr omits base32 padding");
+
+  const uint8_t original[] = {'f'};
+  BBQrParts *parts =
+      bbqr_encode(original, sizeof(original), BBQR_TYPE_PSBT, 400);
+
+  if (!parts) {
+    FAIL("Encode failed");
+    return;
+  }
+
+  if (parts->count != 1 || parts->encoding != BBQR_ENCODING_BASE32 ||
+      strcmp(parts->parts[0], "B$2P0100MY") != 0 ||
+      strchr(parts->parts[0], '=') != NULL) {
+    bbqr_parts_free(parts);
+    FAIL("Output is not unpadded BBQr Base32");
+    return;
+  }
+
+  bbqr_parts_free(parts);
+  PASS();
+}
+
+/* Test that the encoder uses the high-compression raw-deflate path. */
+void test_bbqr_compression_quality(void) {
+  TEST("bbqr high-compression deflate");
+
+  static const uint8_t original[] =
+      "Lorem ipsum dolor sit amet, consectetur adipiscing elit. "
+      "Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. "
+      "Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.";
+  const size_t original_len = sizeof(original) - 1;
+
+  BBQrParts *parts =
+      bbqr_encode(original, original_len, BBQR_TYPE_UNICODE, 400);
+  if (!parts) {
+    FAIL("Encode failed");
+    return;
+  }
+
+  size_t payload_len = strlen(parts->parts[0]) - BBQR_HEADER_LEN;
+  if (parts->count != 1 || parts->encoding != BBQR_ENCODING_ZLIB ||
+      payload_len >= 285) {
+    bbqr_parts_free(parts);
+    FAIL("Compression did not improve on fixed-Huffman output");
+    return;
+  }
+
+  BBQrPart parsed;
+  size_t decoded_len = 0;
+  uint8_t *decoded = NULL;
+  if (!bbqr_parse_part(parts->parts[0], strlen(parts->parts[0]), &parsed) ||
+      !(decoded = bbqr_decode_payload(parsed.encoding, parsed.payload,
+                                      parsed.payload_len, &decoded_len)) ||
+      decoded_len != original_len ||
+      memcmp(decoded, original, original_len) != 0) {
+    free(decoded);
+    bbqr_parts_free(parts);
+    FAIL("Compressed output did not round-trip");
+    return;
+  }
+
+  free(decoded);
+  bbqr_parts_free(parts);
+  PASS();
+}
+
+/* Test direct Base32 emission across multiple contiguous part buffers. */
+void test_bbqr_multipart_streaming(void) {
+  TEST("bbqr streams multipart output");
+
+  uint8_t original[512];
+  uint32_t state = 0x6d2b79f5;
+  for (size_t i = 0; i < sizeof(original); i++) {
+    state = state * 1664525u + 1013904223u;
+    original[i] = (uint8_t)(state >> 24);
+  }
+
+  const int max_chars = 56;
+  const size_t max_payload = max_chars - BBQR_HEADER_LEN;
+  BBQrParts *parts =
+      bbqr_encode(original, sizeof(original), BBQR_TYPE_PSBT, max_chars);
+  if (!parts) {
+    FAIL("Encode failed");
+    return;
+  }
+
+  size_t payload_len = 0;
+  bool valid = parts->count > 1 && parts->storage != NULL;
+  for (int i = 0; valid && i < parts->count; i++) {
+    size_t part_len = strlen(parts->parts[i]);
+    size_t this_payload_len = part_len - BBQR_HEADER_LEN;
+    valid = part_len <= (size_t)max_chars &&
+            strchr(parts->parts[i], '=') == NULL &&
+            (i == parts->count - 1 || this_payload_len == max_payload);
+    if (i > 0) {
+      valid = valid && parts->parts[i] == parts->parts[i - 1] +
+                                              strlen(parts->parts[i - 1]) + 1;
+    }
+    payload_len += this_payload_len;
+  }
+
+  char *payload = valid ? (char *)malloc(payload_len) : NULL;
+  if (!payload) {
+    bbqr_parts_free(parts);
+    FAIL("Invalid part layout or allocation failed");
+    return;
+  }
+
+  size_t offset = 0;
+  for (int i = 0; i < parts->count; i++) {
+    size_t this_payload_len = strlen(parts->parts[i]) - BBQR_HEADER_LEN;
+    memcpy(payload + offset, parts->parts[i] + BBQR_HEADER_LEN,
+           this_payload_len);
+    offset += this_payload_len;
+  }
+
+  size_t decoded_len = 0;
+  uint8_t *decoded =
+      bbqr_decode_payload(parts->encoding, payload, payload_len, &decoded_len);
+  free(payload);
+  if (!decoded || decoded_len != sizeof(original) ||
+      memcmp(decoded, original, sizeof(original)) != 0) {
+    free(decoded);
+    bbqr_parts_free(parts);
+    FAIL("Multipart output did not round-trip");
+    return;
+  }
+
+  free(decoded);
+  bbqr_parts_free(parts);
   PASS();
 }
 
@@ -558,8 +648,10 @@ int main(void) {
   test_base32_roundtrip();
   test_base36();
   test_bbqr_parse_header();
-  test_miniz_roundtrip();
   test_bbqr_roundtrip();
+  test_bbqr_unpadded_base32();
+  test_bbqr_compression_quality();
+  test_bbqr_multipart_streaming();
   test_real_bbqr_decode();
   test_vectors();
 

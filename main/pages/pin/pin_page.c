@@ -5,12 +5,14 @@
 // and symbols.
 
 #include "pin_page.h"
+#include "../../core/nvs_secure.h"
 #include "../../core/pin.h"
 #include "../../ui/dialog.h"
 #include "../../ui/input_helpers.h"
 #include "../../ui/power.h"
 #include "../../ui/theme_widgets.h"
 #include "../../utils/secure_mem.h"
+#include "../session_lock.h"
 
 #include <bsp/pmic.h>
 #include <esp_system.h>
@@ -32,6 +34,7 @@ typedef enum {
   STATE_SETUP_SPLIT,
   STATE_SETUP_EFUSE,
   STATE_SETUP_SHOW_WORDS,
+  STATE_SETUP_NVS_ENC,
   // Delay / wipe
   STATE_DELAY,
 } pin_flow_state_t;
@@ -258,9 +261,7 @@ static void deferred_verify_cb(lv_timer_t *timer) {
   switch (result) {
   case PIN_VERIFY_OK:
     clear_buffers();
-    if (current_mode == PIN_PAGE_CHANGE)
-      transition_to(STATE_SETUP_FULL_PIN);
-    else if (on_complete)
+    if (on_complete)
       on_complete();
     break;
   case PIN_VERIFY_DELAY:
@@ -375,9 +376,42 @@ static void create_back_or_power_button(void) {
     ui_create_power_button(page_screen, power_btn_cb);
 }
 
+// Steps of the PIN-construction wizard (choose, confirm, split). Verifying
+// the current PIN (change mode) and showing anti-phishing words (deferred
+// eFuse epilogue) are uncounted bookends: STATE_SETUP_SHOW_WORDS only runs
+// when eFuse provisioning is accepted and succeeds, so it isn't a guaranteed
+// step. STATE_SETUP_EFUSE and STATE_SETUP_NVS_ENC are dialog overlays, not
+// screens. Adding a setup screen means adding an enum member here and
+// re-pointing SETUP_STEP_COUNT at the new last step.
+enum {
+  SETUP_STEP_FULL_PIN = 1,
+  SETUP_STEP_CONFIRM_PIN,
+  SETUP_STEP_SPLIT,
+  SETUP_STEP_COUNT = SETUP_STEP_SPLIT,
+};
+
+static int32_t setup_step_for_state(pin_flow_state_t state) {
+  switch (state) {
+  case STATE_SETUP_FULL_PIN:
+    return SETUP_STEP_FULL_PIN;
+  case STATE_SETUP_CONFIRM_PIN:
+    return SETUP_STEP_CONFIRM_PIN;
+  case STATE_SETUP_SPLIT:
+    return SETUP_STEP_SPLIT;
+  default:
+    return 0;
+  }
+}
+
 static void build_chrome(const char *title_text) {
   create_back_or_power_button();
   title_label = theme_create_page_title(page_screen, title_text);
+
+  // Unlock, delay, and wipe states all map to 0; only setup screens get a
+  // bar.
+  int32_t step = setup_step_for_state(current_state);
+  if (step > 0)
+    theme_create_progress_bar(page_screen, title_label, step, SETUP_STEP_COUNT);
 }
 
 static void build_entry_state(const char *title_text) {
@@ -397,6 +431,26 @@ static void build_entry_state(const char *title_text) {
 #define IDENTICON_CELLS 5
 #define IDENTICON_CELL_PX (IDENTICON_SIZE / IDENTICON_CELLS) // 24px
 
+// 12 perceptually distinct, nameable colors ("mine is teal" is a stronger
+// check than a remembered hue). Part of the recorded anti-phishing
+// fingerprint — frozen: changing entries changes existing users' identicons.
+static const uint32_t identicon_palette[] = {
+    0xEF4444, // red
+    0xF97316, // orange
+    0xEAB308, // yellow
+    0x84CC16, // lime
+    0x22C55E, // green
+    0x14B8A6, // teal
+    0x06B6D4, // cyan
+    0x3B82F6, // blue
+    0x8B5CF6, // violet
+    0xD946EF, // magenta
+    0xEC4899, // pink
+    0xFFFFFF, // white
+};
+#define IDENTICON_PALETTE_LEN                                                  \
+  (sizeof(identicon_palette) / sizeof(identicon_palette[0]))
+
 static void render_identicon_to(lv_obj_t *canvas, lv_draw_buf_t *draw_buf,
                                 uint8_t pattern[3]) {
   if (!canvas || !draw_buf)
@@ -405,9 +459,8 @@ static void render_identicon_to(lv_obj_t *canvas, lv_draw_buf_t *draw_buf,
   // Extract 15 cell bits from pattern[0..1] (3 independent cols x 5 rows)
   uint16_t bits = ((uint16_t)pattern[0] << 8) | pattern[1];
 
-  // Convert hue byte to color: hue 0-255 → 0-359
-  uint16_t hue = (uint16_t)pattern[2] * 359 / 255;
-  lv_color_t fg = lv_color_hsv_to_rgb(hue, 70, 90);
+  lv_color_t fg =
+      lv_color_hex(identicon_palette[pattern[2] % IDENTICON_PALETTE_LEN]);
   lv_color_t bg = lv_color_black();
 
   // Build 5x5 grid with vertical mirror:
@@ -667,6 +720,31 @@ static void deferred_pin_save(lv_timer_t *timer) {
     on_complete();
 }
 
+static void setup_aborted_dismissed_cb(void) {
+  clear_buffers();
+  if (on_cancel)
+    on_cancel();
+}
+
+// Gate before saving the hash: any setup path that reaches "save" goes
+// through the NVS-encryption consent first. A stored PIN implies encrypted
+// NVS, so an unusable KEY4 aborts setup instead of saving plaintext. Keys
+// off KEY4 presence, not PIN presence.
+static void proceed_to_save(void) {
+  dismiss_processing();
+  if (nvs_secure_is_encrypted()) {
+    show_processing(deferred_pin_save);
+    return;
+  }
+  if (nvs_secure_key_check() == NVS_SECURE_KEY_ERROR) {
+    dialog_show_error_timeout(
+        "Storage encryption unavailable on this device. PIN setup canceled.",
+        setup_aborted_dismissed_cb, 3000);
+    return;
+  }
+  transition_to(STATE_SETUP_NVS_ENC);
+}
+
 static void split_confirm_cb(lv_event_t *e) {
   (void)e;
   pin_efuse_status_t status = pin_efuse_check();
@@ -675,7 +753,7 @@ static void split_confirm_cb(lv_event_t *e) {
   else if (status == PIN_EFUSE_PROVISIONED)
     transition_to(STATE_SETUP_SHOW_WORDS);
   else
-    show_processing(deferred_pin_save);
+    proceed_to_save();
 }
 
 static void build_split_state(void) {
@@ -765,8 +843,39 @@ static void efuse_confirm_result(bool confirmed, void *user_data) {
   if (pin_efuse_check() == PIN_EFUSE_PROVISIONED) {
     transition_to(STATE_SETUP_SHOW_WORDS);
   } else {
-    show_processing(deferred_pin_save);
+    proceed_to_save();
   }
+}
+
+// ---------------------------------------------------------------------------
+// NVS encryption provisioning dialog
+// ---------------------------------------------------------------------------
+
+static void nvs_enc_confirm_result(bool confirmed, void *user_data) {
+  (void)user_data;
+  if (!confirmed) {
+    // Declining cancels PIN setup: a stored PIN implies encrypted NVS
+    clear_buffers();
+    if (on_cancel)
+      on_cancel();
+    return;
+  }
+
+  lv_obj_t *progress = dialog_show_progress(
+      "Provisioning", "Encrypting storage...", DIALOG_STYLE_OVERLAY);
+  esp_err_t err = nvs_secure_provision();
+  if (progress)
+    lv_obj_delete(progress);
+
+  if (err != ESP_OK) {
+    // No plaintext fallback: a stored PIN implies encrypted NVS
+    dialog_show_error_timeout("Storage encryption failed. PIN setup canceled.",
+                              setup_aborted_dismissed_cb, 3000);
+    return;
+  }
+
+  session_lock_reload_settings();
+  show_processing(deferred_pin_save);
 }
 
 // ---------------------------------------------------------------------------
@@ -776,7 +885,7 @@ static void efuse_confirm_result(bool confirmed, void *user_data) {
 static void setup_words_confirm_result(bool confirmed, void *user_data) {
   (void)user_data;
   if (confirmed)
-    show_processing(deferred_pin_save);
+    proceed_to_save();
   // "No" dismisses the dialog, revealing the words and Continue button
 }
 
@@ -796,9 +905,8 @@ static void build_setup_words_deferred(lv_timer_t *timer) {
                                             &word2, identicon_data);
 
   if (err != ESP_OK || !word1 || !word2) {
-    // HMAC failed — chain to deferred_pin_save (PBKDF2 is also slow)
-    lv_timer_t *t = lv_timer_create(deferred_pin_save, 50, NULL);
-    lv_timer_set_repeat_count(t, 1);
+    // HMAC failed — skip words, continue via the NVS-encryption gate
+    proceed_to_save();
     return;
   }
 
@@ -1001,6 +1109,15 @@ static void transition_to(pin_flow_state_t state) {
   case STATE_SETUP_SHOW_WORDS:
     build_setup_words_state();
     break;
+  case STATE_SETUP_NVS_ENC:
+    dialog_show_confirm(
+        "Enable encrypted storage?\n\n"
+        "Your PIN and settings will be stored encrypted. This will "
+        "permanently burn a cryptographic key into the device hardware "
+        "(eFuse) and clear stored settings.\n\n"
+        "This is IRREVERSIBLE. Declining cancels PIN setup.",
+        nvs_enc_confirm_result, NULL, DIALOG_STYLE_FULLSCREEN);
+    break;
   case STATE_DELAY:
     build_delay_state();
     break;
@@ -1037,7 +1154,6 @@ void pin_page_create(lv_obj_t *parent, pin_page_mode_t mode,
 
   switch (mode) {
   case PIN_PAGE_UNLOCK:
-  case PIN_PAGE_CHANGE:
     if (pin_get_delay_ms() > 0)
       transition_to(STATE_DELAY);
     else

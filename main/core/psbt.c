@@ -79,7 +79,7 @@ bool psbt_input_utxo_script(const struct wally_psbt *psbt, size_t input_i,
 
 static bool try_match_whitelist(const unsigned char *keypath,
                                 size_t keypath_len, bool is_testnet,
-                                claim_t *claim_out) {
+                                uint32_t max_index, claim_t *claim_out) {
   if (keypath_len != 4 + 5 * 4)
     return false;
 
@@ -87,7 +87,7 @@ static bool try_match_whitelist(const unsigned char *keypath,
   if (!ss_keypath_parse(keypath + 4, keypath_len - 4, &kp))
     return false;
 
-  if (!ss_keypath_is_whitelisted(&kp, is_testnet))
+  if (!ss_keypath_is_whitelisted(&kp, is_testnet, max_index))
     return false;
 
   claim_out->kind = CLAIM_WHITELIST;
@@ -248,12 +248,14 @@ static bool claim_matches_spk(const claim_t *claim, bool is_testnet,
 }
 
 static bool try_match_claim(const unsigned char *keypath, size_t keypath_len,
-                            bool is_testnet, const unsigned char *target_spk,
+                            bool is_testnet, uint32_t max_index,
+                            const unsigned char *target_spk,
                             size_t target_spk_len,
                             const struct wally_psbt *input_psbt, size_t input_i,
                             claim_t *claim_out) {
   claim_t claim = {0};
-  if (try_match_whitelist(keypath, keypath_len, is_testnet, &claim) &&
+  if (try_match_whitelist(keypath, keypath_len, is_testnet, max_index,
+                          &claim) &&
       claim_matches_spk(&claim, is_testnet, target_spk, target_spk_len,
                         input_psbt, input_i)) {
     *claim_out = claim;
@@ -350,8 +352,9 @@ input_ownership_t psbt_classify_input(const struct wally_psbt *psbt, size_t i,
     claim_t claim = {0};
     remember_raw_keypath(result.raw_keypath, sizeof(result.raw_keypath),
                          &result.raw_keypath_len, keypath, keypath_len);
-    if (try_match_claim(keypath, keypath_len, is_testnet, utxo_script,
-                        utxo_script_len, psbt, i, &claim)) {
+    if (try_match_claim(keypath, keypath_len, is_testnet,
+                        SS_ADDR_INDEX_UNCAPPED, utxo_script, utxo_script_len,
+                        psbt, i, &claim)) {
       result.ownership = PSBT_OWNERSHIP_OWNED_SAFE;
       result.claim = claim;
       return result;
@@ -373,8 +376,8 @@ input_ownership_t psbt_classify_input(const struct wally_psbt *psbt, size_t i,
     claim_t claim = {0};
     remember_raw_keypath(result.raw_keypath, sizeof(result.raw_keypath),
                          &result.raw_keypath_len, val, val_len);
-    if (try_match_claim(val, val_len, is_testnet, utxo_script, utxo_script_len,
-                        NULL, 0, &claim)) {
+    if (try_match_claim(val, val_len, is_testnet, SS_ADDR_INDEX_UNCAPPED,
+                        utxo_script, utxo_script_len, NULL, 0, &claim)) {
       result.ownership = PSBT_OWNERSHIP_OWNED_SAFE;
       result.claim = claim;
       return result;
@@ -438,8 +441,8 @@ output_ownership_t psbt_classify_output(const struct wally_psbt *psbt, size_t i,
     claim_t claim = {0};
     remember_raw_keypath(result.raw_keypath, sizeof(result.raw_keypath),
                          &result.raw_keypath_len, keypath, keypath_len);
-    if (try_match_claim(keypath, keypath_len, is_testnet, out_script,
-                        out_script_len, NULL, 0, &claim)) {
+    if (try_match_claim(keypath, keypath_len, is_testnet, SS_MAX_OUT_ADDR_INDEX,
+                        out_script, out_script_len, NULL, 0, &claim)) {
       result.ownership = PSBT_OWNERSHIP_OWNED_SAFE;
       result.source = claim;
       wally_tx_free(global_tx);
@@ -462,8 +465,8 @@ output_ownership_t psbt_classify_output(const struct wally_psbt *psbt, size_t i,
     claim_t claim = {0};
     remember_raw_keypath(result.raw_keypath, sizeof(result.raw_keypath),
                          &result.raw_keypath_len, val, val_len);
-    if (try_match_claim(val, val_len, is_testnet, out_script, out_script_len,
-                        NULL, 0, &claim)) {
+    if (try_match_claim(val, val_len, is_testnet, SS_MAX_OUT_ADDR_INDEX,
+                        out_script, out_script_len, NULL, 0, &claim)) {
       result.ownership = PSBT_OWNERSHIP_OWNED_SAFE;
       result.source = claim;
       wally_tx_free(global_tx);

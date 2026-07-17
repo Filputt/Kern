@@ -153,6 +153,17 @@ int qr_parser_parse_with_len(QRPartParser *parser, const char *data,
 bool qr_parser_is_complete(QRPartParser *parser);
 
 /**
+ * @brief Check if parsing has failed permanently
+ *
+ * True when the decoder reached a terminal failure state (e.g. UR
+ * checksum mismatch) and feeding more parts can never complete the scan.
+ *
+ * @param parser Parser instance
+ * @return true if parsing can never complete, false otherwise
+ */
+bool qr_parser_is_failed(QRPartParser *parser);
+
+/**
  * @brief Get the assembled result from all parsed parts
  *
  * Combines all parsed parts in the correct order to produce
@@ -196,6 +207,15 @@ bool qr_parser_get_ur_result(QRPartParser *parser, const char **ur_type_out,
  * @return QR format (FORMAT_* constants)
  */
 int qr_parser_get_format(QRPartParser *parser);
+
+/**
+ * @brief Get the BBQr file type character (for FORMAT_BBQR only)
+ *
+ * @param parser Parser instance
+ * @return File type character (e.g. 'P' for PSBT, 'U' for unicode text),
+ *         or 0 if the format is not BBQr
+ */
+char qr_parser_get_bbqr_file_type(QRPartParser *parser);
 
 /**
  * @brief Calculate QR code size from encoded data
