@@ -6,6 +6,10 @@ CONFIG_IDF_TARGET="esp32p4"
 CONFIG_APP_REPRODUCIBLE_BUILD=y
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
+# 0x10000 gives the bootloader 56KB (0x2000..0x10000): the plain bootloader was 320 bytes
+# from the 24KB cap, and the Phase 5 FE / Phase 6 secure boot bootloaders need ~36KB+.
+# nvs moved to 0x11000 (shrunk 84->52KB) so otadata/ota_0/ota_1/storage keep their offsets.
+CONFIG_PARTITION_TABLE_OFFSET=0x10000
 # NVS encryption, HMAC scheme (keys derived from eFuse KEY4, no nvs_keys partition).
 # The app never calls nvs_flash_init(): its keygen path would burn KEY4 without
 # consent. Boot branches on KEY4 presence in core/nvs_secure.c instead.
