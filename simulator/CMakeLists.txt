@@ -314,10 +314,6 @@ set(APP_PAGE_SOURCES
     ${APP_PAGES_DIR}/scan/psbt_sign_policy.c
     # Load page
     ${APP_PAGES_DIR}/load/load.c
-    # Dev tools
-    ${APP_PAGES_DIR}/dev_tools/dev_menu.c
-    ${APP_PAGES_DIR}/dev_tools/snapshot.c
-    ${APP_PAGES_DIR}/dev_tools/decode_snapshots.c
 )
 
 # --- QR + k_quirc + cUR ---

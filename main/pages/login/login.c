@@ -10,15 +10,12 @@
 #include "../../ui/menu.h"
 #include "../../ui/power.h"
 #include "../../ui/theme_widgets.h"
-#include <bsp/pmic.h>
-#ifdef DEV_TOOLS_ENABLED
-#include "../dev_tools/dev_menu.h"
-#endif
 #include "../load_mnemonic/load_menu.h"
 #include "../new_mnemonic/new_mnemonic_menu.h"
 #include "about.h"
 #include "login_scan.h"
 #include "login_settings.h"
+#include <bsp/pmic.h>
 
 static ui_menu_t *login_menu = NULL;
 static lv_obj_t *login_screen = NULL;
@@ -46,10 +43,6 @@ static void return_from_load_menu_cb(void) { login_page_show(); }
 
 static void return_from_new_mnemonic_menu_cb(void) { login_page_show(); }
 
-#ifdef DEV_TOOLS_ENABLED
-static void return_from_dev_menu_cb(void) { login_page_show(); }
-#endif
-
 static void load_mnemonic_cb(void) {
   login_page_hide();
   load_menu_page_create(lv_screen_active(), return_from_load_menu_cb);
@@ -73,14 +66,6 @@ static void settings_cb(void) {
   login_settings_page_create(lv_screen_active(), return_from_settings_cb);
   login_settings_page_show();
 }
-
-#ifdef DEV_TOOLS_ENABLED
-static void dev_tools_cb(void) {
-  login_page_hide();
-  dev_menu_page_create(lv_screen_active(), return_from_dev_menu_cb);
-  dev_menu_page_show();
-}
-#endif
 
 static void about_cb(lv_event_t *e) {
   (void)e;
@@ -107,9 +92,6 @@ void login_page_create(lv_obj_t *parent) {
                               new_mnemonic_cb);
   ui_menu_add_entry_with_icon(login_menu, LV_SYMBOL_SETTINGS, "Settings",
                               settings_cb);
-#ifdef DEV_TOOLS_ENABLED
-  ui_menu_add_entry(login_menu, "Developer Tools", dev_tools_cb);
-#endif
 
   // Visual hierarchy: Load / New Mnemonic are the primary actions (orange
   // outline); everything below is utility, rendered with the secondary style so
