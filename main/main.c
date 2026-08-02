@@ -1,3 +1,4 @@
+#include "core/fw_update.h"
 #include "core/nvs_secure.h"
 #include "core/pin.h"
 #include "core/settings.h"
@@ -21,6 +22,9 @@
 static const char *TAG = "KERN_MAIN";
 
 void app_main(void) {
+  // Air-gap: hold the Wi-Fi/BT co-processor (ESP32-C6) in reset first.
+  ESP_ERROR_CHECK(bsp_wifi_coproc_disable());
+
   // Initialize NVS for persistent settings — encrypted if eFuse KEY4 is
   // provisioned, plaintext otherwise (never stock nvs_flash_init(): its
   // keygen path would burn KEY4 without consent)
@@ -102,4 +106,8 @@ void app_main(void) {
 
   // Unlock display
   bsp_display_unlock();
+
+  // Everything initialized and UI up — confirm a freshly installed update so
+  // the bootloader doesn't roll back to the previous slot
+  fw_update_boot_confirm();
 }

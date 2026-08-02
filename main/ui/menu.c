@@ -441,8 +441,8 @@ bool ui_menu_set_entry_secondary(ui_menu_t *menu, int index, bool secondary) {
   if (!menu || index < 0 || index >= menu->config.entry_count)
     return false;
 
-  /* Primary entries keep the orange outline; secondary ones get the filled
-     surface with no border so they recede and the primary actions stand out. */
+  /* Primary entries keep the orange outline; secondary ones get a gray
+     hairline outline so they recede and the primary actions stand out. */
   theme_apply_touch_button(menu->views[index].button, !secondary);
   return true;
 }

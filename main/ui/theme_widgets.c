@@ -79,13 +79,14 @@ static void init_touch_styles(void) {
 
   lv_style_init(&styles.touch_secondary);
   lv_style_copy(&styles.touch_secondary, style);
-  lv_style_set_bg_color(&styles.touch_secondary, COLOR_SURFACE);
-  lv_style_set_border_width(&styles.touch_secondary, 0);
+  lv_style_set_border_color(&styles.touch_secondary, COLOR_SURFACE);
 
   style = &styles.touch_pressed;
   lv_style_init(style);
-  lv_style_set_bg_color(style, COLOR_ORANGE);
-  lv_style_set_bg_opa(style, LV_OPA_COVER);
+  lv_style_set_border_color(style, COLOR_ORANGE);
+  lv_style_set_bg_color(style, lv_color_mix(COLOR_ORANGE, COLOR_BG, LV_OPA_20));
+  lv_style_set_transform_width(style, 0);
+  lv_style_set_transform_height(style, 0);
 
   style = &styles.touch_disabled;
   lv_style_init(style);

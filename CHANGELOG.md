@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.0.15] - 2026-07-24
+
+### Added
+- PSBT signing: when a transaction cannot be verified because no matching descriptor is loaded, the scan flow offers to load one on the fly instead of dead-ending
+- The ESP32-C6 Wi-Fi/BT co-processor is held in reset on every board, so the radio never comes up on this air-gapped signer
+
+### Changed
+- **Partition table moved from 0x8000 to 0x10000**, enlarging the bootloader slot to 56KB — headroom the future flash-encryption and secure-boot bootloaders will need (the plain bootloader was already 320 bytes short of the old 24KB cap). NVS absorbs the shift — it moves to 0x11000 and shrinks from 84KB to 52KB; otadata, both app slots, and storage keep their offsets. **Existing devices need one serial reflash and NVS re-setup (PIN and settings); SD-card and OTA updates cannot cross this change.**
+- Every build now carries a Secure Boot v2 signature block: IDF aborts at boot when the running app is unsigned, so dev builds are auto-signed with a per-clone throwaway key (generated on first build, gitignored) and releases re-sign the retained unsigned image offline with the real key
+- Updated libwally
+
+
+## [0.0.14] - 2026-07-20
+
+### Added
+- SD card firmware updates (security roadmap Phase 4): Settings → Firmware Update installs signed firmware from the SD card; the image is fully validated before any flash write (chip, project, version downgrade check, Secure Boot v2 RSA-3072 signature against the running app's keys), and the new image must self-confirm on first boot or the bootloader rolls back to the previous slot
+
+### Changed
+- App images carry Secure Boot v2 signature blocks; OTA updates are verified via signed-app-on-update (no secure boot eFuses involved yet), serial flashing unaffected
+- The release single-file image is now a sparse Intel HEX (`kern-v<ver>.hex`) that preserves NVS (PIN, settings) and stored data when reflashing, replacing the raw merged `.bin`
+
+### Fixed
+- Release merged image placed OTA data at the pre-migration offset (0xf000), overwriting part of the NVS partition; corrected to 0x1e000 (same fix in the web flasher's fallback offsets)
+
 ## [0.0.13] - 2026-07-17
 
 ### Added
