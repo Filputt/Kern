@@ -7,6 +7,17 @@
 // Compact keyboard maps shared by all boards.
 // Trade fewer keys per row for wider touch targets.
 
+// Ctrl-map roles. Only KB_ACTION carries CTRL_CHECKED, which is what the theme
+// renders as a filled action key. Mode switches deliberately drop it so the
+// fill keeps meaning "backspace/OK". KB_BACKSPACE omits NO_REPEAT so it still
+// repeats when held.
+#define KB_KEY 1
+#define KB_SPACE 5
+#define KB_MODE                                                                \
+  (LV_BUTTONMATRIX_CTRL_NO_REPEAT | LV_BUTTONMATRIX_CTRL_CLICK_TRIG | 2)
+#define KB_BACKSPACE (LV_BUTTONMATRIX_CTRL_CHECKED | 2)
+#define KB_ACTION (LV_KEYBOARD_CTRL_BUTTON_FLAGS | 2)
+
 static const char *const compact_kb_map_lc[] = {
     "q",  "w",  "e",  "r",   "t",  "y",
     "u",  "i",  "o",  "p",   "\n", "a",
@@ -17,39 +28,16 @@ static const char *const compact_kb_map_lc[] = {
     ""};
 
 static const lv_buttonmatrix_ctrl_t compact_kb_ctrl_lc_map[] = {
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    LV_KEYBOARD_CTRL_BUTTON_FLAGS | 2,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    LV_BUTTONMATRIX_CTRL_CHECKED | 2,
-    LV_KEYBOARD_CTRL_BUTTON_FLAGS | 2,
-    1,
-    5,
-    1,
-    LV_KEYBOARD_CTRL_BUTTON_FLAGS | 2};
+    // q w e r t y u i o p
+    KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY,
+    KB_KEY,
+    // a s d f g h j k l
+    KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY,
+    // ABC z x c v b n m <-
+    KB_MODE, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY,
+    KB_BACKSPACE,
+    // 1# , _ . OK
+    KB_MODE, KB_KEY, KB_SPACE, KB_KEY, KB_ACTION};
 
 static const char *const compact_kb_map_uc[] = {
     "Q",  "W",  "E",  "R",   "T",  "Y",
@@ -61,39 +49,16 @@ static const char *const compact_kb_map_uc[] = {
     ""};
 
 static const lv_buttonmatrix_ctrl_t compact_kb_ctrl_uc_map[] = {
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    LV_KEYBOARD_CTRL_BUTTON_FLAGS | 2,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    LV_BUTTONMATRIX_CTRL_CHECKED | 2,
-    LV_KEYBOARD_CTRL_BUTTON_FLAGS | 2,
-    1,
-    5,
-    1,
-    LV_KEYBOARD_CTRL_BUTTON_FLAGS | 2};
+    // Q W E R T Y U I O P
+    KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY,
+    KB_KEY,
+    // A S D F G H J K L
+    KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY,
+    // abc Z X C V B N M <-
+    KB_MODE, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY,
+    KB_BACKSPACE,
+    // 1# , _ . OK
+    KB_MODE, KB_KEY, KB_SPACE, KB_KEY, KB_ACTION};
 
 // Five rows covering every printable ASCII symbol (',' and '.' live on the
 // letter pages) so any externally created passphrase or KEF key can be typed.
@@ -107,50 +72,20 @@ static const char *const compact_kb_map_spec[] = {
     "\n", "~", "^",  "`",  " ",  LV_SYMBOL_OK, ""};
 
 static const lv_buttonmatrix_ctrl_t compact_kb_ctrl_spec_map[] = {
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    LV_KEYBOARD_CTRL_BUTTON_FLAGS | 2,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    1,
-    LV_BUTTONMATRIX_CTRL_CHECKED | 2,
-    1,
-    1,
-    1,
-    5,
-    LV_KEYBOARD_CTRL_BUTTON_FLAGS | 2};
+    // 1 2 3 4 5 6 7 8 9 0
+    KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY,
+    KB_KEY,
+    // @ # $ % & * + - = /
+    KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY,
+    KB_KEY,
+    // ( ) [ ] { } < > " '
+    KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY,
+    KB_KEY,
+    // abc ! ? ; : _ \ | <-
+    KB_MODE, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY, KB_KEY,
+    KB_BACKSPACE,
+    // ~ ^ ` _ OK
+    KB_KEY, KB_KEY, KB_KEY, KB_SPACE, KB_ACTION};
 
 // Corner buttons (back/power top-left, settings top-right) all share the
 // secondary grey style so they read as one consistent control class.
@@ -291,21 +226,7 @@ void ui_text_input_create(ui_text_input_t *input, lv_obj_t *parent,
   lv_keyboard_set_map(input->keyboard, LV_KEYBOARD_MODE_SPECIAL,
                       compact_kb_map_spec, compact_kb_ctrl_spec_map);
 
-  /* Keyboard dark theme */
-  lv_obj_set_style_bg_color(input->keyboard, lv_color_black(), 0);
-  lv_obj_set_style_border_width(input->keyboard, 0, 0);
-  lv_obj_set_style_pad_all(input->keyboard, 4, 0);
-  lv_obj_set_style_pad_gap(input->keyboard, theme_key_gap(), 0);
-  lv_obj_set_style_bg_color(input->keyboard, disabled_color(), LV_PART_ITEMS);
-  lv_obj_set_style_text_color(input->keyboard, primary_color(), LV_PART_ITEMS);
-  lv_obj_set_style_text_font(input->keyboard, theme_font_small(),
-                             LV_PART_ITEMS);
-  lv_obj_set_style_border_width(input->keyboard, 0, LV_PART_ITEMS);
-  lv_obj_set_style_radius(input->keyboard, theme_key_gap(), LV_PART_ITEMS);
-  lv_obj_set_style_bg_color(input->keyboard, highlight_color(),
-                            LV_PART_ITEMS | LV_STATE_PRESSED);
-  lv_obj_set_style_bg_color(input->keyboard, highlight_color(),
-                            LV_PART_ITEMS | LV_STATE_CHECKED);
+  theme_apply_btnmatrix_styles(input->keyboard);
 }
 
 void ui_text_input_show(ui_text_input_t *input) {

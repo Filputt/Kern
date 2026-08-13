@@ -17,6 +17,10 @@ void theme_apply_label(lv_obj_t *label, bool is_secondary);
 void theme_apply_button_label(lv_obj_t *label, bool is_secondary);
 void theme_apply_touch_button(lv_obj_t *btn, bool is_primary);
 void theme_apply_btnmatrix(lv_obj_t *btnmatrix);
+// Styles only, no button-control flags. For lv_keyboard, whose ctrl flags are
+// re-applied from its stored ctrl maps on every mode switch.
+void theme_apply_btnmatrix_styles(lv_obj_t *btnmatrix);
+void theme_set_btnmatrix_action(lv_obj_t *btnmatrix, uint32_t btn_id);
 // Standard slider look: scaled track, highlight indicator/knob, knob grown to
 // min_touch size. The knob overhangs the track by theme_slider_knob_pad() on
 // each side — callers must leave that much vertical clearance.
