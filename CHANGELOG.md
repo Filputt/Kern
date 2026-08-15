@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- Support for Waveshare ESP32-P4-WiFi6-Touch-LCD-7B (wave_7b, 1024x600 MIPI DSI, EK79007)
+
 ## [0.0.16] - 2026-08-11
 
 ### Added
