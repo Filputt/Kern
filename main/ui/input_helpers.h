@@ -40,6 +40,10 @@ lv_obj_t *ui_create_info_button(lv_obj_t *parent, lv_event_cb_t event_cb);
 // LV_EVENT_GESTURE per swipe, tap_cb a LV_EVENT_CLICKED per tap. A touch that
 // moved without becoming a swipe reaches neither. Either callback may be
 // NULL.
+//
+// One object at a time: the travel tracking is global, so a second enabled
+// object on screen would take over the tracking mid-touch. tap_cb also gets no
+// user data of its own, the event carries the callback pointer instead.
 void ui_enable_tap_swipe(lv_obj_t *obj, lv_event_cb_t tap_cb,
                          lv_event_cb_t swipe_cb);
 

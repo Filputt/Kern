@@ -141,11 +141,15 @@ lv_obj_t *ui_create_info_button(lv_obj_t *parent, lv_event_cb_t event_cb) {
   return create_corner_button(parent, LV_ALIGN_TOP_RIGHT, ICON_INFO, event_cb);
 }
 
-// Swipe travel in pixels. The LVGL default of 50 fired on drags meant as taps.
-#define SWIPE_MIN_DISTANCE 75
+// Swipe and tap travel scale with the touch target, so a gesture spans the same
+// share of the panel on a 320 px board as on a 1024 px one. The LVGL default of
+// 50 px fired on drags meant as taps.
+static int32_t swipe_min_distance(void) {
+  return theme_min_touch_size() * 5 / 6;
+}
 
-// Travel in pixels past which the touch is not a tap.
-#define TAP_SLOP 15
+// Travel past which the touch is not a tap.
+static int32_t tap_slop(void) { return theme_min_touch_size() / 6; }
 
 static lv_point_t touch_origin;
 static bool not_tap;
@@ -173,8 +177,9 @@ static void swipe_travel_cb(lv_event_t *e) {
   }
 
   // Mark it as not a tap
-  if (LV_ABS(p.x - touch_origin.x) > TAP_SLOP ||
-      LV_ABS(p.y - touch_origin.y) > TAP_SLOP)
+  int32_t slop = tap_slop();
+  if (LV_ABS(p.x - touch_origin.x) > slop ||
+      LV_ABS(p.y - touch_origin.y) > slop)
     not_tap = true;
 }
 
@@ -191,9 +196,16 @@ void ui_enable_tap_swipe(lv_obj_t *obj, lv_event_cb_t tap_cb,
   if (!obj)
     return;
 
-  // The distance is per input device, and lv_indev_active() is NULL outside
+  // Both limits are per input device, and lv_indev_active() is NULL outside
   // event processing, so reach the touch panel through the device list.
-  lv_indev_set_gesture_min_distance(touch_indev(), SWIPE_MIN_DISTANCE);
+  lv_indev_t *indev = touch_indev();
+  lv_indev_set_gesture_min_distance(indev, (uint8_t)swipe_min_distance());
+  // LVGL discards the travel accumulated so far on any read that moved less
+  // than the minimum velocity. The simulator reads once per mouse-motion event,
+  // a couple of pixels apart, so the accumulator never survived to the
+  // threshold there. Zero disables the reset and leaves the accumulator equal
+  // to the net travel since the press, which is what the distance limit means.
+  lv_indev_set_gesture_min_velocity(indev, 0);
 
   // Both a tap and a swipe need the object to be the one under the finger.
   lv_obj_add_flag(obj, LV_OBJ_FLAG_CLICKABLE);
