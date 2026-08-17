@@ -142,8 +142,7 @@ lv_obj_t *ui_create_info_button(lv_obj_t *parent, lv_event_cb_t event_cb) {
 }
 
 // Swipe and tap travel scale with the touch target, so a gesture spans the same
-// share of the panel on a 320 px board as on a 1024 px one. The LVGL default of
-// 50 px fired on drags meant as taps.
+// share of the panel on a 320 px board as on a 1024 px one.
 static int32_t swipe_min_distance(void) {
   return theme_min_touch_size() * 5 / 6;
 }
@@ -153,34 +152,52 @@ static int32_t tap_slop(void) { return theme_min_touch_size() / 6; }
 
 static lv_point_t touch_origin;
 static bool not_tap;
+static bool dragging;
 
-// The touch panel is the only pointer device. Look it up instead of taking the
-// list head, so a keypad or encoder added later cannot shadow it.
-static lv_indev_t *touch_indev(void) {
-  for (lv_indev_t *indev = lv_indev_get_next(NULL); indev;
-       indev = lv_indev_get_next(indev)) {
-    if (lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER)
-      return indev;
-  }
-  return NULL;
-}
-
-static void swipe_travel_cb(lv_event_t *e) {
+// Travel is measured against the press point rather than read from LVGL's
+// gesture accumulator, which zeroes itself on any input read slower than its
+// velocity floor.
+static void touch_track_cb(lv_event_t *e) {
+  ui_drag_cb_t drag_cb = (ui_drag_cb_t)lv_event_get_user_data(e);
+  lv_event_code_t code = lv_event_get_code(e);
   lv_point_t p;
   lv_indev_get_point(lv_event_get_indev(e), &p);
-
-  // Track origin
-  if (lv_event_get_code(e) == LV_EVENT_PRESSED) {
+  if (code == LV_EVENT_PRESSED) {
     touch_origin = p;
     not_tap = false;
+    dragging = false;
     return;
   }
 
-  // Mark it as not a tap
-  int32_t slop = tap_slop();
-  if (LV_ABS(p.x - touch_origin.x) > slop ||
-      LV_ABS(p.y - touch_origin.y) > slop)
-    not_tap = true;
+  int32_t dx = p.x - touch_origin.x;
+  int32_t dy = p.y - touch_origin.y;
+
+  switch (code) {
+  case LV_EVENT_PRESSING: {
+    if (!dragging) {
+      int32_t slop = tap_slop();
+      if (LV_ABS(dx) <= slop && LV_ABS(dy) <= slop)
+        break;
+      not_tap = true;
+      dragging = true;
+    }
+    if (drag_cb)
+      drag_cb(dx, dy, false);
+    break;
+  }
+  // The finger sliding off the object ends the drag there: the release lands
+  // on whatever it moved onto and never reaches this callback.
+  case LV_EVENT_RELEASED:
+  case LV_EVENT_PRESS_LOST:
+    if (dragging) {
+      dragging = false;
+      if (drag_cb)
+        drag_cb(dx, dy, true);
+    }
+    break;
+  default:
+    break;
+  }
 }
 
 // A touch that moved but never became a swipe still ends in a click. Drop it
@@ -191,42 +208,34 @@ static void tap_filter_cb(lv_event_t *e) {
   ((lv_event_cb_t)lv_event_get_user_data(e))(e);
 }
 
-void ui_enable_tap_swipe(lv_obj_t *obj, lv_event_cb_t tap_cb,
-                         lv_event_cb_t swipe_cb) {
+void ui_enable_tap_drag(lv_obj_t *obj, lv_event_cb_t tap_cb,
+                        ui_drag_cb_t drag_cb) {
   if (!obj)
     return;
 
-  // Both limits are per input device, and lv_indev_active() is NULL outside
-  // event processing, so reach the touch panel through the device list.
-  lv_indev_t *indev = touch_indev();
-  lv_indev_set_gesture_min_distance(indev, (uint8_t)swipe_min_distance());
-  // LVGL discards the travel accumulated so far on any read that moved less
-  // than the minimum velocity. The simulator reads once per mouse-motion event,
-  // a couple of pixels apart, so the accumulator never survived to the
-  // threshold there. Zero disables the reset and leaves the accumulator equal
-  // to the net travel since the press, which is what the distance limit means.
-  lv_indev_set_gesture_min_velocity(indev, 0);
-
-  // Both a tap and a swipe need the object to be the one under the finger.
+  // Both a tap and a drag need the object to be the one under the finger.
   lv_obj_add_flag(obj, LV_OBJ_FLAG_CLICKABLE);
-  // Objects carry LV_OBJ_FLAG_GESTURE_BUBBLE by default, which walks the
-  // gesture up to the screen and past any handler installed here.
-  lv_obj_clear_flag(obj, LV_OBJ_FLAG_GESTURE_BUBBLE);
 
-  lv_obj_add_event_cb(obj, swipe_travel_cb, LV_EVENT_PRESSED, NULL);
-  lv_obj_add_event_cb(obj, swipe_travel_cb, LV_EVENT_PRESSING, NULL);
-  if (swipe_cb)
-    lv_obj_add_event_cb(obj, swipe_cb, LV_EVENT_GESTURE, NULL);
+  lv_obj_add_event_cb(obj, touch_track_cb, LV_EVENT_PRESSED, drag_cb);
+  lv_obj_add_event_cb(obj, touch_track_cb, LV_EVENT_PRESSING, drag_cb);
+  lv_obj_add_event_cb(obj, touch_track_cb, LV_EVENT_RELEASED, drag_cb);
+  lv_obj_add_event_cb(obj, touch_track_cb, LV_EVENT_PRESS_LOST, drag_cb);
   if (tap_cb)
     lv_obj_add_event_cb(obj, tap_filter_cb, LV_EVENT_CLICKED, tap_cb);
 }
 
-lv_dir_t ui_consume_swipe_dir(lv_event_t *e) {
-  lv_indev_t *indev = lv_event_get_indev(e);
-  lv_dir_t dir = lv_indev_get_gesture_dir(indev);
-  if (dir != LV_DIR_NONE)
-    lv_indev_wait_release(indev);
-  return dir;
+bool ui_drag_is_swipe(int32_t dx, int32_t dy, lv_dir_t *dir) {
+  int32_t abs_x = LV_ABS(dx);
+  int32_t abs_y = LV_ABS(dy);
+  bool horizontal = abs_x >= abs_y;
+  if ((horizontal ? abs_x : abs_y) < swipe_min_distance())
+    return false;
+
+  if (horizontal)
+    *dir = dx < 0 ? LV_DIR_LEFT : LV_DIR_RIGHT;
+  else
+    *dir = dy < 0 ? LV_DIR_TOP : LV_DIR_BOTTOM;
+  return true;
 }
 
 /* ---------- Shared text input component ---------- */

@@ -36,20 +36,25 @@ lv_obj_t *ui_create_settings_button(lv_obj_t *parent, lv_event_cb_t event_cb);
 // Creates info button at top-right with the circle-info icon
 lv_obj_t *ui_create_info_button(lv_obj_t *parent, lv_event_cb_t event_cb);
 
-// Makes obj touchable and splits its touches in two: swipe_cb gets a
-// LV_EVENT_GESTURE per swipe, tap_cb a LV_EVENT_CLICKED per tap. A touch that
-// moved without becoming a swipe reaches neither. Either callback may be
-// NULL.
+// Travel of the touch so far, against the point it went down at. Called on
+// every move once the touch is too far along to be a tap, then a last time
+// with released set, whether the finger lifted or slid off the object. Use it
+// to follow the finger; call ui_drag_is_swipe() on the last one to decide
+// whether the drag counts.
+typedef void (*ui_drag_cb_t)(int32_t dx, int32_t dy, bool released);
+
+// Makes obj touchable and splits its touches in two: drag_cb follows the
+// moving ones, tap_cb gets a LV_EVENT_CLICKED for the still ones. A touch that
+// moved reaches tap_cb no more. Either callback may be NULL.
 //
 // One object at a time: the travel tracking is global, so a second enabled
 // object on screen would take over the tracking mid-touch. tap_cb also gets no
 // user data of its own, the event carries the callback pointer instead.
-void ui_enable_tap_swipe(lv_obj_t *obj, lv_event_cb_t tap_cb,
-                         lv_event_cb_t swipe_cb);
+void ui_enable_tap_drag(lv_obj_t *obj, lv_event_cb_t tap_cb,
+                        ui_drag_cb_t drag_cb);
 
-// Direction of a LV_EVENT_GESTURE event, or LV_DIR_NONE if there is none.
-// Consumes the touch: without this LVGL still reports a click on release and
-// the tap callback would fire on top of the swipe.
-lv_dir_t ui_consume_swipe_dir(lv_event_t *e);
+// True when a drag travelled far enough to count as a swipe, with dir set to
+// the axis it went furthest along.
+bool ui_drag_is_swipe(int32_t dx, int32_t dy, lv_dir_t *dir);
 
 #endif
