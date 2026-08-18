@@ -399,8 +399,13 @@ kef_error_t kef_encrypt(const uint8_t *id, size_t id_len, uint8_t version,
 
   /* --- Generate IV ----------------------------------------------- */
   memset(iv, 0, sizeof(iv));
-  if (vi->iv_size > 0)
-    crypto_random_bytes(iv, vi->iv_size);
+  if (vi->iv_size > 0) {
+    rc = crypto_random_bytes(iv, vi->iv_size);
+    if (rc != CRYPTO_OK) {
+      err = KEF_ERR_CRYPTO;
+      goto cleanup;
+    }
+  }
 
   /* --- Compress -------------------------------------------------- */
   const uint8_t *work = plaintext;

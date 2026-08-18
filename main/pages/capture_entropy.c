@@ -318,9 +318,10 @@ static void touch_event_cb(lv_event_t *e) {
 
   if (wally_sha256(current_display_buffer, buffer_size, mixed, SHA256_LEN) ==
       WALLY_OK) {
-    crypto_random_bytes(mixed + SHA256_LEN, SHA256_LEN);
-    mixed_ok = wally_sha256(mixed, sizeof(mixed), captured_entropy,
-                            sizeof(captured_entropy)) == WALLY_OK;
+    mixed_ok =
+        crypto_random_bytes(mixed + SHA256_LEN, SHA256_LEN) == CRYPTO_OK &&
+        wally_sha256(mixed, sizeof(mixed), captured_entropy,
+                     sizeof(captured_entropy)) == WALLY_OK;
   }
   secure_memzero(mixed, sizeof(mixed));
 
