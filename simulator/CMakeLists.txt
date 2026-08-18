@@ -158,6 +158,8 @@ set(STUB_SOURCES
 # --- Application utilities ---
 set(APP_UTIL_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/utils/bip39_filter.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../main/utils/dice_quality.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../main/utils/estimated_entropy.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/utils/session.c
 )
 

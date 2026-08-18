@@ -31,9 +31,12 @@ void capture_entropy_page_hide(void);
 void capture_entropy_page_destroy(void);
 
 /**
- * @brief Get the captured 32-byte SHA256 hash
+ * @brief Get the captured 32-byte entropy digest
  *
- * @param hash_out Buffer to receive 32 bytes of hash data
+ * The digest is SHA256(SHA256(frame) || TRNG), so it is not reproducible from
+ * the snapshot alone.
+ *
+ * @param hash_out Buffer to receive 32 bytes of digest data
  * @return true if hash was captured and copied, false otherwise
  */
 bool capture_entropy_get_hash(uint8_t *hash_out);
