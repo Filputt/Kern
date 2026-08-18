@@ -1,9 +1,11 @@
+#include "core/entropy_pool.h"
 #include "core/fw_update.h"
 #include "core/nvs_secure.h"
 #include "core/pin.h"
 #include "core/settings.h"
 #include "pages/session_lock.h"
 #include "ui/assets/kern_logo_lvgl.h"
+#include "ui/entropy_input.h"
 #include "ui/theme_widgets.h"
 #include "utils/bip39_filter.h"
 #include "video.h"
@@ -22,6 +24,9 @@
 static const char *TAG = "KERN_MAIN";
 
 void app_main(void) {
+  // Seed before anything can ask for randomness
+  entropy_pool_init();
+
   // Air-gap: hold the Wi-Fi/BT co-processor (ESP32-C6) in reset first.
   ESP_ERROR_CHECK(bsp_wifi_coproc_disable());
 
@@ -38,6 +43,10 @@ void app_main(void) {
 
   bsp_display_start();
   ESP_LOGI(TAG, "Display initialized successfully");
+
+  bsp_display_lock(0);
+  entropy_input_attach();
+  bsp_display_unlock();
 
   esp_err_t video_ret = app_video_init_once(bsp_i2c_get_handle());
   if (video_ret == ESP_OK) {

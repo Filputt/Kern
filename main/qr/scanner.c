@@ -2,6 +2,7 @@
 
 #include "scanner.h"
 #include "../components/cUR/src/ur_decoder.h"
+#include "../core/entropy_pool.h"
 #include "../core/settings.h"
 #include "../ui/dialog.h"
 #include "../ui/input_helpers.h"
@@ -987,6 +988,21 @@ static void camera_video_frame_operation(uint8_t *camera_buf,
   if (camera_buf_hes == 0 || camera_buf_ves == 0) {
     __atomic_sub_fetch(&active_frame_operations, 1, __ATOMIC_SEQ_CST);
     return;
+  }
+
+  // Sensor shot noise is real physical entropy and the frame is already here.
+  // memcpy rather than a uint32_t cast: the callback contract hands over a
+  // uint8_t *, so alignment is an assumption about today's allocator, not a
+  // guarantee. Three separate stirs rather than one XOR of the three, which
+  // would let equal samples cancel on a uniform frame.
+  if (camera_buf && camera_buf_len >= sizeof(uint32_t)) {
+    size_t last = (camera_buf_len - sizeof(uint32_t)) & ~(size_t)3;
+    size_t offsets[3] = {0, (last / 2) & ~(size_t)3, last};
+    for (size_t i = 0; i < 3; i++) {
+      uint32_t word;
+      memcpy(&word, camera_buf + offsets[i], sizeof(word));
+      entropy_pool_stir(word);
+    }
   }
 
   if (settings_active) {

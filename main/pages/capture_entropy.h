@@ -33,8 +33,9 @@ void capture_entropy_page_destroy(void);
 /**
  * @brief Get the captured 32-byte entropy digest
  *
- * The digest is SHA256(SHA256(frame) || TRNG), so it is not reproducible from
- * the snapshot alone.
+ * The digest is SHA256(SHA256(frame) || random), where the random half comes
+ * from crypto_random_bytes() - hardware RNG conditioned with the entropy pool.
+ * Not reproducible from the snapshot alone.
  *
  * @param hash_out Buffer to receive 32 bytes of digest data
  * @return true if hash was captured and copied, false otherwise

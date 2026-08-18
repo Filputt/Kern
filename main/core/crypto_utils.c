@@ -1,4 +1,5 @@
 #include "crypto_utils.h"
+#include "entropy_pool.h"
 #include <bootloader_random.h>
 #include <esp_random.h>
 #include <psa/crypto.h>
@@ -310,6 +311,7 @@ int crypto_random_bytes(uint8_t *buf, size_t len) {
       return CRYPTO_ERR_INTERNAL;
   }
 
+  entropy_pool_mix(buf, len);
   return CRYPTO_OK;
 }
 

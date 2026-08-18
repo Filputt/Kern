@@ -13,6 +13,7 @@
 
 #include "../components/video/video.h"
 #include "../core/crypto_utils.h"
+#include "../core/entropy_pool.h"
 #include "../ui/dialog.h"
 #include "../ui/input_helpers.h"
 #include "../ui/theme_widgets.h"
@@ -222,6 +223,21 @@ static void camera_frame_cb(uint8_t *camera_buf, uint8_t camera_buf_index,
   if (ppa_do_scale_rotate_mirror(cam_ppa_client, &srm) != ESP_OK) {
     __atomic_sub_fetch(&active_frame_ops, 1, __ATOMIC_SEQ_CST);
     return;
+  }
+
+  // Sensor shot noise is real physical entropy and the frame is already here.
+  // memcpy rather than a uint32_t cast: the callback contract hands over a
+  // uint8_t *, so alignment is an assumption about today's allocator, not a
+  // guarantee. Three separate stirs rather than one XOR of the three, which
+  // would let equal samples cancel on a uniform frame.
+  if (display_buffer_size >= sizeof(uint32_t)) {
+    size_t last = (display_buffer_size - sizeof(uint32_t)) & ~(size_t)3;
+    size_t offsets[3] = {0, (last / 2) & ~(size_t)3, last};
+    for (size_t i = 0; i < 3; i++) {
+      uint32_t word;
+      memcpy(&word, back_buffer + offsets[i], sizeof(word));
+      entropy_pool_stir(word);
+    }
   }
 
   if (!closing && !dialog_showing && bsp_display_lock(0)) {

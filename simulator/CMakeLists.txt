@@ -130,6 +130,7 @@ set(APP_UI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../main/ui)
 set(SIM_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/main_sim.c
     ${CMAKE_CURRENT_SOURCE_DIR}/platform/esp_idf_stubs/stubs.c
+    ${APP_UI_DIR}/entropy_input.c
     ${APP_UI_DIR}/font_policy.c
     ${APP_UI_DIR}/theme.c
     ${APP_UI_DIR}/theme_widgets.c
@@ -170,6 +171,7 @@ set(APP_CORE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/platform/esp_idf_stubs/storage_sim.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/pin.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/crypto_utils.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/entropy_pool.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/kef.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/wallet.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/base43.c
@@ -457,6 +459,7 @@ add_executable(kern_sim_storage_smoke
     ${CMAKE_CURRENT_SOURCE_DIR}/platform/esp_idf_stubs/storage_sim.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/kef.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/crypto_utils.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/entropy_pool.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/deflate_codec/src/deflate_codec.c
     ${CMAKE_CURRENT_SOURCE_DIR}/platform/esp_idf_stubs/stubs.c
     ${CMAKE_CURRENT_SOURCE_DIR}/platform/esp_idf_stubs/sim_flash.c
