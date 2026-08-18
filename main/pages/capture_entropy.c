@@ -5,7 +5,6 @@
 #include <bsp/esp-bsp.h>
 #include <driver/ppa.h>
 #include <esp_log.h>
-#include <esp_random.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <lvgl.h>
@@ -13,6 +12,7 @@
 #include <wally_crypto.h>
 
 #include "../components/video/video.h"
+#include "../core/crypto_utils.h"
 #include "../ui/dialog.h"
 #include "../ui/input_helpers.h"
 #include "../ui/theme_widgets.h"
@@ -318,7 +318,7 @@ static void touch_event_cb(lv_event_t *e) {
 
   if (wally_sha256(current_display_buffer, buffer_size, mixed, SHA256_LEN) ==
       WALLY_OK) {
-    esp_fill_random(mixed + SHA256_LEN, SHA256_LEN);
+    crypto_random_bytes(mixed + SHA256_LEN, SHA256_LEN);
     mixed_ok = wally_sha256(mixed, sizeof(mixed), captured_entropy,
                             sizeof(captured_entropy)) == WALLY_OK;
   }
