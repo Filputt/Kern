@@ -5,6 +5,7 @@
 #include "../../core/kef.h"
 #include "../../core/storage.h"
 #include "../../qr/scanner.h"
+#include "../../ui/assets/icons.h"
 #include "../../ui/menu.h"
 #include "../../ui/theme_widgets.h"
 #include "../home/home.h"
@@ -239,10 +240,14 @@ void load_menu_page_create(lv_obj_t *parent, void (*return_cb)(void)) {
   if (!load_menu)
     return;
 
-  ui_menu_add_entry(load_menu, "From QR Code", from_qr_code_cb);
-  ui_menu_add_entry(load_menu, "From Manual Input", from_manual_input_cb);
-  ui_menu_add_entry(load_menu, "From Flash", from_flash_cb);
-  ui_menu_add_entry(load_menu, "From SD Card", from_sd_cb);
+  ui_menu_add_entry_with_icon(load_menu, ICON_QR_CODE, "From QR Code",
+                              from_qr_code_cb);
+  ui_menu_add_entry_with_icon(load_menu, LV_SYMBOL_KEYBOARD,
+                              "From Manual Input", from_manual_input_cb);
+  ui_menu_add_entry_with_icon(load_menu, LV_SYMBOL_DRIVE, "From Flash",
+                              from_flash_cb);
+  ui_menu_add_entry_with_icon(load_menu, ICON_SD_CARD, "From SD Card",
+                              from_sd_cb);
   ui_menu_show(load_menu);
 }
 
