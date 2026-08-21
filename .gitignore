@@ -4,7 +4,9 @@ build_wave_35/
 build_wave_4b/
 build_wave_43/
 build_wave_5/
+build_wave_7b/
 build_crowpanel/
+build_wave_7b/
 sdkconfig
 sdkconfig.old
 managed_components/
@@ -38,6 +40,7 @@ main/core/test/test_registry_parse
 main/core/test/test_psbt_classify
 main/core/test/test_miniscript_policy
 main/core/test/test_bip322
+main/core/test/test_estimated_entropy
 main/core/test/combined.o
 main/core/test/libwally.a
 

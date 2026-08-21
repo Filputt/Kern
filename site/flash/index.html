@@ -4,12 +4,12 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Kern Web Flasher</title>
-  <meta name="description" content="Flash Kern daily builds to your ESP32-P4 device directly from the browser.">
+  <meta name="description" content="Flash Kern research builds to your ESP32-P4 device directly from the browser.">
 
   <meta property="og:type"        content="website">
   <meta property="og:url"         content="https://odudex.github.io/Kern/flash/">
   <meta property="og:title"       content="Kern Web Flasher">
-  <meta property="og:description" content="Flash Kern firmware to your ESP32-P4 device directly from the browser.">
+  <meta property="og:description" content="Flash Kern research builds to your ESP32-P4 device directly from the browser.">
   <meta property="og:image"       content="https://odudex.github.io/Kern/branding/og_preview.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
@@ -17,7 +17,7 @@
 
   <meta name="twitter:card"        content="summary_large_image">
   <meta name="twitter:title"       content="Kern Web Flasher">
-  <meta name="twitter:description" content="Flash Kern daily builds to your ESP32-P4 device directly from the browser.">
+  <meta name="twitter:description" content="Flash Kern research builds to your ESP32-P4 device directly from the browser.">
   <meta name="twitter:image"       content="https://odudex.github.io/Kern/branding/og_preview.png">
   <meta name="twitter:image:alt"   content="Kern logo on dark background">
   <style>
@@ -157,8 +157,9 @@
   </div>
 
   <div class="banner banner-warn">
-    ⚠ <strong>Warning:</strong> CI builds are unvetted development snapshots from a young, unaudited project.
-    Secure boot is not enabled; do <strong>not</strong> use flashed firmware to manage real savings.
+    ⚠ <strong>Warning:</strong> CI builds are unvetted development snapshots from a research project.
+    Secure boot is not enabled. Flash them for experimentation and testnet use; any mainnet use is
+    entirely at your own risk.
   </div>
 
   <!-- Firmware source card -->
@@ -179,6 +180,7 @@
         <option value="wave_5">Waveshare ESP32-P4 5&quot; (720×1280 MIPI DSI)</option>
         <option value="wave_43">Waveshare ESP32-P4 4.3&quot; (480×800 MIPI DSI)</option>
         <option value="crowpanel">CrowPanel Advanced ESP32-P4 7&quot; / 10.1&quot; (1024×600 MIPI DSI)</option>
+        <option value="wave_7b">Waveshare ESP32-P4-WiFi6-Touch-LCD-7B (1024×600 MIPI DSI)</option>
       </select>
       <div class="file-list" id="ciFileList"></div>
     </div>

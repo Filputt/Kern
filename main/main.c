@@ -1,9 +1,11 @@
+#include "core/entropy_pool.h"
 #include "core/fw_update.h"
 #include "core/nvs_secure.h"
 #include "core/pin.h"
 #include "core/settings.h"
 #include "pages/session_lock.h"
 #include "ui/assets/kern_logo_lvgl.h"
+#include "ui/entropy_input.h"
 #include "ui/theme_widgets.h"
 #include "utils/bip39_filter.h"
 #include "video.h"
@@ -22,6 +24,9 @@
 static const char *TAG = "KERN_MAIN";
 
 void app_main(void) {
+  // Seed before anything can ask for randomness
+  entropy_pool_init();
+
   // Air-gap: hold the Wi-Fi/BT co-processor (ESP32-C6) in reset first.
   ESP_ERROR_CHECK(bsp_wifi_coproc_disable());
 
@@ -29,10 +34,19 @@ void app_main(void) {
   // provisioned, plaintext otherwise (never stock nvs_flash_init(): its
   // keygen path would burn KEY4 without consent)
   ESP_ERROR_CHECK(nvs_secure_init());
-  settings_init();
+  // Not fatal: every getter falls back to its default when the namespace is
+  // unavailable, and those defaults are the safe ones.
+  esp_err_t settings_ret = settings_init();
+  if (settings_ret != ESP_OK)
+    ESP_LOGE(TAG, "Settings init failed, using defaults: %s",
+             esp_err_to_name(settings_ret));
 
   bsp_display_start();
   ESP_LOGI(TAG, "Display initialized successfully");
+
+  bsp_display_lock(0);
+  entropy_input_attach();
+  bsp_display_unlock();
 
   esp_err_t video_ret = app_video_init_once(bsp_i2c_get_handle());
   if (video_ret == ESP_OK) {
@@ -87,10 +101,13 @@ void app_main(void) {
   }
 
   // Initialize BIP39 wordlist (needed for anti-phishing words)
-  bip39_filter_init();
+  if (!bip39_filter_init())
+    ESP_LOGE(TAG, "BIP39 wordlist init failed");
 
-  // Initialize PIN module
-  pin_init();
+  // Initialize the PIN module. Fail closed: without it pin_is_configured()
+  // reports false, and the boot gate below would walk straight past the PIN
+  // of a device that has one set.
+  ESP_ERROR_CHECK(pin_init());
 
   // Lock display again for modifications
   bsp_display_lock(0);

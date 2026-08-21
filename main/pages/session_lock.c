@@ -7,17 +7,26 @@
 #include "../core/wallet.h"
 #include "../ui/dialog.h"
 #include "../utils/session.h"
+#include "disclaimer.h"
 #include "login/login.h"
 #include "pin/pin_page.h"
 #include "screensaver.h"
 #include "video.h"
 #include <bsp/pmic.h>
+#include <esp_log.h>
+
+static const char *TAG = "SESSION_LOCK";
 
 static bool device_locked = false;
 
+static void login_now(void) { login_page_create(lv_screen_active()); }
+
+// Gating the login page rather than boot itself keeps the disclaimer
+// unskippable: an idle timeout at the dialog locks the device, and the login
+// page it eventually returns to is behind the same gate.
 static void unlock_finished(void) {
   device_locked = false;
-  login_page_create(lv_screen_active());
+  disclaimer_gate(login_now);
 }
 
 // ---------------------------------------------------------------------------
@@ -32,13 +41,25 @@ static bool migration_pending(void) {
   return pin_is_configured() && !nvs_secure_is_encrypted();
 }
 
+// Declining the migration is meant to leave the device with no PIN. If the
+// removal fails the PIN is still set, so say so rather than letting the user
+// believe it is gone.
+static void remove_pin_or_warn(void) {
+  esp_err_t err = pin_remove();
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "PIN removal failed: %s", esp_err_to_name(err));
+    dialog_show_error_timeout("Could not remove the PIN - it is still set",
+                              NULL, 0);
+  }
+}
+
 static void migration_setup_done(void) {
   pin_page_destroy();
   unlock_finished();
 }
 
 static void migration_setup_cancel(void) {
-  pin_remove();
+  remove_pin_or_warn();
   pin_page_destroy();
   unlock_finished();
 }
@@ -46,7 +67,7 @@ static void migration_setup_cancel(void) {
 static void migration_confirm_result(bool confirmed, void *user_data) {
   (void)user_data;
   if (!confirmed) {
-    pin_remove();
+    remove_pin_or_warn();
     unlock_finished();
     return;
   }
@@ -72,8 +93,7 @@ static void lock_dismissed_cb(void) {
   if (pin_is_configured()) {
     pin_page_create(lv_screen_active(), PIN_PAGE_UNLOCK, post_unlock_cb, NULL);
   } else {
-    device_locked = false;
-    login_page_create(lv_screen_active());
+    unlock_finished();
   }
 }
 
@@ -126,6 +146,6 @@ void session_lock_boot_gate(lv_obj_t *screen) {
     device_locked = true;
     pin_page_create(screen, PIN_PAGE_UNLOCK, post_unlock_cb, NULL);
   } else {
-    login_page_create(screen);
+    unlock_finished();
   }
 }

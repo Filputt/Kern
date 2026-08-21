@@ -1,4 +1,6 @@
 #include "crypto_utils.h"
+#include "entropy_pool.h"
+#include <bootloader_random.h>
 #include <esp_random.h>
 #include <psa/crypto.h>
 #include <stdbool.h>
@@ -283,10 +285,34 @@ int crypto_aes_gcm_decrypt(const uint8_t key[CRYPTO_AES_KEY_SIZE],
 
 /* --- Random --- */
 
-void crypto_random_bytes(uint8_t *buf, size_t len) {
-  if (buf && len > 0) {
-    esp_fill_random(buf, len);
+int crypto_random_bytes(uint8_t *buf, size_t len) {
+  if (!buf || len == 0)
+    return CRYPTO_ERR_INVALID_ARG;
+
+  // The P4 bootloader disables the SAR ADC noise source before handing off to
+  // the application, so esp_random() has no physical entropy mixed into it
+  // unless the source is switched back on. IDF's random.rst claims otherwise
+  // for chips without RF, but the registers say otherwise on silicon: at app
+  // start the ADC trigger is off, matching the post-disable state exactly.
+  // Not reentrant - every caller here is sequential, init- or UI-driven.
+  bootloader_random_enable();
+  esp_fill_random(buf, len);
+  bootloader_random_disable();
+
+  // Health check. An all-zero block means the RNG is dead, not that we drew
+  // 2^-64 odds; callers burn these bytes into eFuse, so failing loudly beats
+  // provisioning a key of zeros. Skipped below 8 bytes, where all-zero is a
+  // plausible draw.
+  if (len >= 8) {
+    uint8_t acc = 0;
+    for (size_t i = 0; i < len; i++)
+      acc |= buf[i];
+    if (acc == 0)
+      return CRYPTO_ERR_INTERNAL;
   }
+
+  entropy_pool_mix(buf, len);
+  return CRYPTO_OK;
 }
 
 /* --- Padding --- */
