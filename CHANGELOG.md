@@ -1,9 +1,24 @@
 # Changelog
 
-## [Unreleased]
+## [0.0.17] - 2026-08-24
 
 ### Added
 - Support for Waveshare ESP32-P4-WiFi6-Touch-LCD-7B (wave_7b, 1024x600 MIPI DSI, EK79007)
+- Entropy quality checks on the two user-supplied sources: dice rolls pair a Shannon histogram estimate with a consecutive-difference pattern check, and camera capture folds the hardware RNG into the frame digest by hashing. The estimates describe the observed distribution, not cryptographic entropy; dice deliberately stays reproducible so the derivation can be verified off-device
+- An auxiliary entropy pool behind the hardware RNG, fed by touch timing and camera sensor noise and folded into `crypto_random_bytes` by hashing rather than XOR, so a worthless or attacker-known pool leaves the output exactly as strong as the RNG alone. Extraction ratchets the pool, so a later compromise cannot recover the state behind bytes already handed out
+- The mnemonic backup QR viewer navigates zoomed regions by swipe, one axis at a time, and drags the zoomed region under the finger
+- Icons on the mnemonic and descriptor source menus
+
+### Changed
+- The BIP39 passphrase was the only secret entered in plaintext, with the confirm dialog echoing it back verbatim. It is now masked like PIN and KEF-key entry, with the same eye toggle, and confirmed by the fingerprint transition it produces (current > with-passphrase): a typo still looks like plausible dots either way, but it derives a different wallet, which a mismatched fingerprint makes visible. Wallet Settings now shows only the currently-active fingerprint
+- Every keypad marks its backspace/OK key with a solid orange fill, so the primary action is distinct at rest instead of only flashing on press; regular keys move to an orange outline
+- Addresses viewer uses the screen space more efficiently
+- Updated cUR and k_quirc
+
+### Fixed
+- `warn_unused_result` is enforced across `core/`, `qr/` and `utils/`, which surfaced 42 discarded results. The one that mattered: `pin_init()`'s failure was dropped in both `app_main()` and the simulator, and `pin_is_configured()` returns false when the module is not initialized, so a failed init booted a device that has a PIN set straight past its own PIN gate. Both now fail closed. `pin_wipe_all()` ignored every step of the anti-brute-force wipe and restarted regardless; `storage_sanitize_id()` formatted an uninitialised hash buffer into a name shown in the UI and used to build a filename
+- `crypto_random_bytes` returned void, so failure was structurally invisible: `pin.c` and `nvs_secure.c` would have burned a key made of stack garbage into eFuse. It now returns a checked status and rejects an all-zero draw
+- The SAR ADC entropy source is off at app start on the ESP32-P4, leaving `esp_random()` without physical noise; it is now enabled around RNG reads
 
 ## [0.0.16] - 2026-08-11
 
