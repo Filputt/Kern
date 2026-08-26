@@ -277,6 +277,7 @@ pin_verify_result_t pin_verify(const char *pin, size_t len) {
 
   uint8_t max_fail = PIN_DEFAULT_MAX_FAILURES;
   nvs_get_u8(pin_nvs, KEY_MAX_FAIL, &max_fail);
+  max_fail = pin_attempt_clamp_max_failures(max_fail);
 
   // Pre-increment failure count and commit before the slow PBKDF2 so that
   // a power-cut during verification cannot gift the attacker a free attempt.
@@ -394,7 +395,7 @@ uint8_t pin_get_max_failures(void) {
     return PIN_DEFAULT_MAX_FAILURES;
   uint8_t val = PIN_DEFAULT_MAX_FAILURES;
   nvs_get_u8(pin_nvs, KEY_MAX_FAIL, &val);
-  return val;
+  return pin_attempt_clamp_max_failures(val);
 }
 
 bool pin_has_anti_phishing(void) {
@@ -408,7 +409,7 @@ bool pin_has_anti_phishing(void) {
 esp_err_t pin_set_max_failures(uint8_t max) {
   if (!initialized)
     return ESP_ERR_INVALID_STATE;
-  if (max < 5 || max > 50)
+  if (max < PIN_MIN_MAX_FAILURES || max > PIN_MAX_MAX_FAILURES)
     return ESP_ERR_INVALID_ARG;
   esp_err_t err = nvs_set_u8(pin_nvs, KEY_MAX_FAIL, max);
   if (err != ESP_OK)
