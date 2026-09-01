@@ -1,6 +1,9 @@
 # Roadmap
 
+Kern is a research and development project. This list tracks what has been explored and what is still open: research directions, not a release schedule.
+
 - ✅ Basic UI
+- ✅ Multi-board support
 - ✅ Camera video pipeline
 - ✅ Static QR codes
   - ✅ Scan
@@ -33,10 +36,11 @@
   - ✅ Mainnet
   - ✅ Testnet
 - ✅ Account (any BIP44/49/84/86 account 0–100, no per-session selection required)
-- Signing model
+- ✅ BIP85 deterministic entropy
+- Policy types
   - ✅ Single-sig (BIP44/49/84/86 whitelist; no policy setting required)
   - ✅ Multisig (session-loaded descriptors, with explicit flash + SD backup/import)
-  - ❌ Miniscript
+  - ✅ Miniscript (Native Segwit and Taproot)
 - Descriptors
   - ✅ Loading
   - ✅ Exporting
@@ -48,20 +52,26 @@
   - ✅ Native Segwit (P2WPKH, BIP84)
   - ✅ Nested Segwit (P2SH-P2WPKH, BIP49)
   - ✅ Taproot (P2TR, BIP86)
+- ✅ Message signing (BIP137 and PSBT-based BIP322)
+- ✅ Address exploration and verification (scan to verify)
 
 - Security
   - ✅ KEF encryption
-  - ✅ PIN
+  - ✅ PIN (with anti-phishing identicon)
+  - ✅ SD card air-gapped updates with signature verification
+  - ✅ Encrypted NVS storage (eFuse-derived keys)
+  - ✅ Session lock with auto-timeout
   - ❌ OTP based secure boot
   - ❌ Flash/RAM encryption
   - ❌ Option to disable USB-serial and JTAG
 
 - Easy Installer
-  - ❌ Flasher
+  - ✅ Flasher
   - ❌ Secure boot activation
   - ❌ Flash/RAM encryption activation
 
 - Reliability
+  - ✅ Simulator (desktop, with webcam QR scanning)
   - ❌ Auto tests
 
 - ❌ User's documentation

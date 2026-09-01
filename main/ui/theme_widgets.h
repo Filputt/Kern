@@ -6,6 +6,9 @@
 // Widget factory: builders and stylers that assemble LVGL objects from the
 // theme tokens (colours, fonts, sizes) declared in theme.h.
 
+// Called by theme_init() after fonts and scaled dimensions are ready.
+void theme_widgets_init(void);
+
 void theme_apply_screen(lv_obj_t *obj);
 lv_obj_t *theme_create_page_container(lv_obj_t *parent);
 void theme_apply_frame(lv_obj_t *frame);
@@ -14,11 +17,24 @@ void theme_apply_label(lv_obj_t *label, bool is_secondary);
 void theme_apply_button_label(lv_obj_t *label, bool is_secondary);
 void theme_apply_touch_button(lv_obj_t *btn, bool is_primary);
 void theme_apply_btnmatrix(lv_obj_t *btnmatrix);
+// Styles only, no button-control flags. For lv_keyboard, whose ctrl flags are
+// re-applied from its stored ctrl maps on every mode switch.
+void theme_apply_btnmatrix_styles(lv_obj_t *btnmatrix);
+void theme_set_btnmatrix_action(lv_obj_t *btnmatrix, uint32_t btn_id);
+// Standard slider look: scaled track, highlight indicator/knob, knob grown to
+// min_touch size. The knob overhangs the track by theme_slider_knob_pad() on
+// each side — callers must leave that much vertical clearance.
+void theme_apply_slider(lv_obj_t *slider);
 lv_obj_t *theme_create_button(lv_obj_t *parent, const char *text,
                               bool is_primary);
 lv_obj_t *theme_create_label(lv_obj_t *parent, const char *text,
                              bool is_secondary);
 lv_obj_t *theme_create_page_title(lv_obj_t *parent, const char *text);
+// Slim step indicator for multi-screen flows (e.g. PIN setup). Aligns
+// directly below `anchor` (typically the page title). `anchor` must be
+// non-NULL (asserted); returns NULL if `parent` is NULL or `total` <= 0.
+lv_obj_t *theme_create_progress_bar(lv_obj_t *parent, lv_obj_t *anchor,
+                                    int32_t current, int32_t total);
 void theme_apply_transparent_container(lv_obj_t *obj);
 lv_obj_t *theme_create_scroll_column(lv_obj_t *parent, int32_t pad,
                                      int32_t gap);

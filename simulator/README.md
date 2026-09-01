@@ -58,16 +58,20 @@ just sim-build
 
 ```bash
 ./simulator/build/kern_simulator
-# or, from the repo root:
+# or, from the repo root (builds with webcam support and runs with --webcam):
 just sim
+# without camera:
+just sim-no-cam
 ```
 
 ### macOS
 
 ```bash
 ./simulator/build/kern_simulator
-# or, from the repo root:
+# or, from the repo root (builds with webcam support and runs with --webcam):
 just sim
+# without camera:
+just sim-no-cam
 ```
 
 ## CLI Options
@@ -85,24 +89,29 @@ just sim
 
 ## Examples
 
+The `just` recipes only take a board argument (e.g. `just sim wave_35`); CLI options are passed by running the binary directly:
+
 ```bash
-# Run with default settings
+# Run with webcam (default settings)
 just sim
 
+# Run without camera
+just sim-no-cam
+
 # Run with a QR code image
-just sim --qr-image path/to/qr.png
+just sim-qr path/to/qr.png
 
 # Run with a directory of QR images (cycled)
-just sim --qr-dir path/to/qr-images/
+./simulator/build/kern_simulator --qr-dir path/to/qr-images/
 
 # Run with custom data directory
-just sim --data-dir /tmp/kern-sim-data
+./simulator/build/kern_simulator --data-dir /tmp/kern-sim-data
 
 # Run with custom resolution
-just sim --width 480 --height 480
+./simulator/build/kern_simulator --width 480 --height 480
 
 # Combine options
-just sim --qr-image path/to/qr.png --data-dir /tmp/kern-sim-data
+./simulator/build/kern_simulator --qr-image path/to/qr.png --data-dir /tmp/kern-sim-data
 ```
 
 ## Data Directory Layout
@@ -130,7 +139,8 @@ factory state.
 ## Webcam Support (Optional)
 
 Build with real webcam capture to scan QR codes and generate
-real entropy (V4L2 on Linux, AVFoundation on macOS):
+real entropy (V4L2 on Linux, AVFoundation on macOS). This is
+what `just sim` does; the manual steps:
 
 ### Linux
 
@@ -179,16 +189,17 @@ cmake -B build -S . -DSIM_LCD_H_RES=480 -DSIM_LCD_V_RES=480
 **White screen over SSH X forwarding (`ssh -X`):**
 
 ```bash
-SDL_VIDEODRIVER=x11 SDL_RENDER_DRIVER=software just sim
+SDL_VIDEODRIVER=x11 SDL_RENDER_DRIVER=software ./simulator/build/kern_simulator
 ```
 
 The RANDR extension is not available over forwarded X11.
-Forcing the software renderer works around this.
+Forcing the software renderer works around this. The `just sim`
+recipes already set these variables.
 
 ## Known Limitations
 
-- Camera simulation is file-based by default (build with
-  `-DSIM_WEBCAM=ON` for real webcam support)
+- In raw cmake builds camera simulation is file-based unless
+  built with `-DSIM_WEBCAM=ON` (`just sim` builds with it)
 - eFuse HMAC uses a hardcoded test key (anti-phishing
   words differ from real device, and PIN-derived keys are
   trivially recoverable from `sim_data/`)

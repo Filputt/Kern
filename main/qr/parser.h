@@ -1,6 +1,8 @@
 #ifndef QR_PARSER_H
 #define QR_PARSER_H
 
+#include "../utils/attributes.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -23,6 +25,12 @@
 #define UR_CBOR_PREFIX_LEN 14
 #define UR_BYTEWORDS_CRC_LEN 4
 #define UR_MIN_FRAGMENT_LENGTH 10
+
+/**
+ * @brief Resource limits for stored non-UR multipart QR data
+ */
+#define QR_PARSER_MAX_MULTIPART_PARTS 1024
+#define QR_PARSER_MAX_STORED_BYTES (1024U * 1024U)
 
 /**
  * @brief Maximum QR code versions supported (limited to version 20)
@@ -54,13 +62,16 @@ typedef struct {
  * supporting various formats including P M-of-N, UR, and BBQR.
  */
 typedef struct {
-  QRPart **parts;     /**< Array of parsed QR parts */
-  int parts_capacity; /**< Allocated capacity for parts array */
-  int parts_count;    /**< Current number of parts */
-  int total;          /**< Total expected number of parts */
-  int format;         /**< Detected QR format (FORMAT_* constants) */
-  BBQrCode *bbqr;     /**< BBQr specific data (if format is BBQR) */
-  void *ur_decoder;   /**< UR decoder instance (if format is UR) */
+  QRPart **parts;      /**< Array of parsed QR parts */
+  int parts_capacity;  /**< Allocated capacity for parts array */
+  int parts_count;     /**< Current number of parts */
+  int total;           /**< Total expected number of parts */
+  int format;          /**< Detected QR format (FORMAT_* constants) */
+  BBQrCode *bbqr;      /**< BBQr specific data (if format is BBQR) */
+  void *ur_decoder;    /**< UR decoder instance (if format is UR) */
+  size_t stored_bytes; /**< Aggregate bytes held by parts */
+  bool failed;         /**< A terminal parser failure occurred */
+  bool alloc_failed;   /**< The failure was an allocation failure */
 } QRPartParser;
 
 /**
@@ -70,7 +81,7 @@ typedef struct {
  *
  * @return Pointer to new parser instance, or NULL on failure
  */
-QRPartParser *qr_parser_create(void);
+KERN_WARN_UNUSED_RESULT QRPartParser *qr_parser_create(void);
 
 /**
  * @brief Destroy parser and free all associated memory
@@ -91,7 +102,7 @@ void qr_parser_destroy(QRPartParser *parser);
  * @param parser Parser instance
  * @return Number of parsed parts
  */
-int qr_parser_parsed_count(QRPartParser *parser);
+KERN_WARN_UNUSED_RESULT int qr_parser_parsed_count(QRPartParser *parser);
 
 /**
  * @brief Get the number of processed parts (including duplicates)
@@ -102,7 +113,8 @@ int qr_parser_parsed_count(QRPartParser *parser);
  * @param parser Parser instance
  * @return Number of processed parts
  */
-int qr_parser_processed_parts_count(QRPartParser *parser);
+KERN_WARN_UNUSED_RESULT int
+qr_parser_processed_parts_count(QRPartParser *parser);
 
 /**
  * @brief Get the total expected number of parts
@@ -113,7 +125,7 @@ int qr_parser_processed_parts_count(QRPartParser *parser);
  * @param parser Parser instance
  * @return Total expected parts, or -1 if not yet determined
  */
-int qr_parser_total_count(QRPartParser *parser);
+KERN_WARN_UNUSED_RESULT int qr_parser_total_count(QRPartParser *parser);
 
 /**
  * @brief Parse a QR code data string
@@ -125,7 +137,8 @@ int qr_parser_total_count(QRPartParser *parser);
  * @param data QR code data string to parse
  * @return Part index on success, or -1 on failure
  */
-int qr_parser_parse(QRPartParser *parser, const char *data);
+KERN_WARN_UNUSED_RESULT int qr_parser_parse(QRPartParser *parser,
+                                            const char *data);
 
 /**
  * @brief Parse QR code data with explicit length
@@ -133,13 +146,17 @@ int qr_parser_parse(QRPartParser *parser, const char *data);
  * Like qr_parser_parse but accepts an explicit length, which is necessary
  * for binary data that may contain null bytes (e.g., Compact SeedQR).
  *
+ * @note UR parts are forwarded to the UR decoder, which reads them as C
+ * strings, so data must still be null-terminated at data_len.
+ *
  * @param parser Parser instance
  * @param data QR code data (may contain null bytes)
  * @param data_len Length of the data in bytes
  * @return Part index on success, or -1 on failure
  */
-int qr_parser_parse_with_len(QRPartParser *parser, const char *data,
-                             size_t data_len);
+KERN_WARN_UNUSED_RESULT int qr_parser_parse_with_len(QRPartParser *parser,
+                                                     const char *data,
+                                                     size_t data_len);
 
 /**
  * @brief Check if all expected parts have been received
@@ -150,7 +167,19 @@ int qr_parser_parse_with_len(QRPartParser *parser, const char *data,
  * @param parser Parser instance
  * @return true if parsing is complete, false otherwise
  */
-bool qr_parser_is_complete(QRPartParser *parser);
+KERN_WARN_UNUSED_RESULT bool qr_parser_is_complete(QRPartParser *parser);
+
+/**
+ * @brief Check if parsing has failed permanently
+ *
+ * True when parsing reached a terminal failure state (for example, a UR
+ * checksum mismatch, a multipart metadata/resource-limit violation, or an
+ * allocation failure) and feeding more parts can never complete the scan.
+ *
+ * @param parser Parser instance
+ * @return true if parsing can never complete, false otherwise
+ */
+KERN_WARN_UNUSED_RESULT bool qr_parser_is_failed(QRPartParser *parser);
 
 /**
  * @brief Get the assembled result from all parsed parts
@@ -167,7 +196,8 @@ bool qr_parser_is_complete(QRPartParser *parser);
  * @return Allocated string containing the result, or NULL on failure.
  *         Caller must free the returned string.
  */
-char *qr_parser_result(QRPartParser *parser, size_t *result_len);
+KERN_WARN_UNUSED_RESULT char *qr_parser_result(QRPartParser *parser,
+                                               size_t *result_len);
 
 /**
  * @brief Get the UR decoder result (for FORMAT_UR only)
@@ -183,9 +213,9 @@ char *qr_parser_result(QRPartParser *parser, size_t *result_len);
  * @param cbor_len_out Pointer to store CBOR data length
  * @return true on success, false on failure
  */
-bool qr_parser_get_ur_result(QRPartParser *parser, const char **ur_type_out,
-                             const uint8_t **cbor_data_out,
-                             size_t *cbor_len_out);
+KERN_WARN_UNUSED_RESULT bool
+qr_parser_get_ur_result(QRPartParser *parser, const char **ur_type_out,
+                        const uint8_t **cbor_data_out, size_t *cbor_len_out);
 
 /**
  * @brief Get the detected QR format
@@ -195,7 +225,16 @@ bool qr_parser_get_ur_result(QRPartParser *parser, const char **ur_type_out,
  * @param parser Parser instance
  * @return QR format (FORMAT_* constants)
  */
-int qr_parser_get_format(QRPartParser *parser);
+KERN_WARN_UNUSED_RESULT int qr_parser_get_format(QRPartParser *parser);
+
+/**
+ * @brief Get the BBQr file type character (for FORMAT_BBQR only)
+ *
+ * @param parser Parser instance
+ * @return File type character (e.g. 'P' for PSBT, 'U' for unicode text),
+ *         or 0 if the format is not BBQr
+ */
+char qr_parser_get_bbqr_file_type(QRPartParser *parser);
 
 /**
  * @brief Calculate QR code size from encoded data
@@ -206,6 +245,6 @@ int qr_parser_get_format(QRPartParser *parser);
  * @param qr_code Encoded QR code data
  * @return Estimated QR code size in modules
  */
-int get_qr_size(const char *qr_code);
+KERN_WARN_UNUSED_RESULT int get_qr_size(const char *qr_code);
 
 #endif

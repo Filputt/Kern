@@ -6,6 +6,7 @@
 
 /* Wally types needed by stubs */
 #include <wally_bip32.h>
+#include <wally_descriptor.h>
 #include <wally_psbt.h>
 #include <wally_psbt_members.h>
 #include <wally_script.h>
@@ -64,6 +65,13 @@ void storage_free_file_list(char **files, int count) {
 
 /* --- Wallet stubs --- */
 wallet_network_t wallet_get_network(void) { return WALLET_NETWORK_MAINNET; }
+
+int wallet_descriptor_parse(const char *descriptor,
+                            const struct wally_map *vars_in, uint32_t network,
+                            struct wally_descriptor **output) {
+  uint32_t flags = KERN_DESCRIPTOR_MAX_DEPTH << WALLY_MINISCRIPT_DEPTH_SHIFT;
+  return wally_descriptor_parse(descriptor, vars_in, network, flags, output);
+}
 
 /* --- Settings stub: permissive signing disabled in tests --- */
 #include "core/settings.h"
@@ -1090,6 +1098,713 @@ static void test_psbt_classify_adv_taproot_foreign_fp(void) {
 }
 
 /* ================================================================
+ * Input amount provenance tests
+ *
+ * The fee is inputs minus outputs. Outputs are committed to by the sighash,
+ * inputs are not (BIP143 commits only to the input's own amount, and the
+ * legacy sighash commits to nothing), so an amount is only trustworthy when
+ * the previous transaction that funds it is present and hashes to the
+ * outpoint being spent.
+ * ================================================================ */
+
+/* Build a single-input PSBT that genuinely spends `prev_value` from `spk`.
+ * The prevout txid is derived from the previous transaction, so attaching
+ * `*prev_out` as the non_witness_utxo verifies. Caller frees `*prev_out`. */
+static struct wally_psbt *make_amount_psbt(const uint8_t *spk, size_t spk_len,
+                                           uint64_t prev_value,
+                                           struct wally_tx **prev_out) {
+  *prev_out = NULL;
+
+  struct wally_tx *prev = NULL;
+  if (wally_tx_init_alloc(2, 0, 1, 1, &prev) != WALLY_OK)
+    return NULL;
+  uint8_t funding_txid[32] = {0};
+  funding_txid[0] = 0xaa;
+  wally_tx_add_raw_input(prev, funding_txid, sizeof(funding_txid), 0,
+                         0xffffffff, NULL, 0, NULL, 0);
+  wally_tx_add_raw_output(prev, prev_value, spk, spk_len, 0);
+
+  uint8_t txid[32];
+  if (wally_tx_get_txid(prev, txid, sizeof(txid)) != WALLY_OK) {
+    wally_tx_free(prev);
+    return NULL;
+  }
+
+  struct wally_tx *tx = NULL;
+  if (wally_tx_init_alloc(2, 0, 1, 1, &tx) != WALLY_OK) {
+    wally_tx_free(prev);
+    return NULL;
+  }
+  wally_tx_add_raw_input(tx, txid, sizeof(txid), 0, 0xffffffff, NULL, 0, NULL,
+                         0);
+  uint8_t op_return[] = {0x6a};
+  wally_tx_add_raw_output(tx, 0, op_return, sizeof(op_return), 0);
+
+  struct wally_psbt *psbt = NULL;
+  int ret = wally_psbt_from_tx(tx, 0, 0, &psbt);
+  wally_tx_free(tx);
+  if (ret != WALLY_OK) {
+    wally_tx_free(prev);
+    return NULL;
+  }
+
+  *prev_out = prev;
+  return psbt;
+}
+
+static void set_witness_value(struct wally_psbt *psbt, uint64_t satoshi) {
+  struct wally_tx_output *utxo = NULL;
+  wally_tx_output_init_alloc(satoshi, REF_SPK_P2WPKH, sizeof(REF_SPK_P2WPKH),
+                             &utxo);
+  wally_psbt_set_input_witness_utxo(psbt, 0, utxo);
+  wally_tx_output_free(utxo);
+}
+
+static void test_amount_missing(void) {
+  TEST("psbt_get_input_amount: no utxo data -> MISSING");
+
+  struct wally_tx *prev = NULL;
+  struct wally_psbt *psbt =
+      make_amount_psbt(REF_SPK_P2WPKH, sizeof(REF_SPK_P2WPKH), 100000, &prev);
+  if (!psbt) {
+    FAIL("make_amount_psbt");
+    return;
+  }
+
+  psbt_input_amount_t a = psbt_get_input_amount(psbt, 0);
+  if (a.status != PSBT_AMOUNT_MISSING || a.value != 0)
+    FAIL("expected MISSING/0");
+  else
+    PASS();
+
+  wally_psbt_free(psbt);
+  wally_tx_free(prev);
+}
+
+static void test_amount_witness_only_asserted(void) {
+  TEST("psbt_get_input_amount: witness_utxo only -> ASSERTED");
+
+  struct wally_tx *prev = NULL;
+  struct wally_psbt *psbt =
+      make_amount_psbt(REF_SPK_P2WPKH, sizeof(REF_SPK_P2WPKH), 100000, &prev);
+  if (!psbt) {
+    FAIL("make_amount_psbt");
+    return;
+  }
+  set_witness_value(psbt, 100000);
+
+  psbt_input_amount_t a = psbt_get_input_amount(psbt, 0);
+  if (a.status != PSBT_AMOUNT_ASSERTED || a.value != 100000)
+    FAIL("expected ASSERTED/100000");
+  else
+    PASS();
+
+  wally_psbt_free(psbt);
+  wally_tx_free(prev);
+}
+
+static void test_amount_prev_tx_proven(void) {
+  TEST("psbt_get_input_amount: matching non_witness_utxo -> PROVEN");
+
+  struct wally_tx *prev = NULL;
+  struct wally_psbt *psbt =
+      make_amount_psbt(REF_SPK_P2WPKH, sizeof(REF_SPK_P2WPKH), 100000, &prev);
+  if (!psbt) {
+    FAIL("make_amount_psbt");
+    return;
+  }
+  wally_psbt_set_input_utxo(psbt, 0, prev);
+
+  psbt_input_amount_t a = psbt_get_input_amount(psbt, 0);
+  if (a.status != PSBT_AMOUNT_PROVEN || a.value != 100000)
+    FAIL("expected PROVEN/100000");
+  else
+    PASS();
+
+  wally_psbt_free(psbt);
+  wally_tx_free(prev);
+}
+
+static void test_amount_fabricated_prev_tx(void) {
+  TEST("psbt_get_input_amount: non_witness_utxo for a different tx -> INVALID");
+
+  struct wally_tx *prev = NULL;
+  struct wally_psbt *psbt =
+      make_amount_psbt(REF_SPK_P2WPKH, sizeof(REF_SPK_P2WPKH), 100000, &prev);
+  if (!psbt) {
+    FAIL("make_amount_psbt");
+    return;
+  }
+
+  /* Same script, understated value: a plausible-looking previous transaction
+   * that hashes to a different txid than the one being spent. */
+  struct wally_tx *forged = NULL;
+  wally_tx_init_alloc(2, 0, 1, 1, &forged);
+  uint8_t funding_txid[32] = {0};
+  funding_txid[0] = 0xaa;
+  wally_tx_add_raw_input(forged, funding_txid, sizeof(funding_txid), 0,
+                         0xffffffff, NULL, 0, NULL, 0);
+  wally_tx_add_raw_output(forged, 1000, REF_SPK_P2WPKH, sizeof(REF_SPK_P2WPKH),
+                          0);
+  wally_psbt_set_input_utxo(psbt, 0, forged);
+
+  psbt_input_amount_t a = psbt_get_input_amount(psbt, 0);
+  if (a.status != PSBT_AMOUNT_INVALID)
+    FAIL("forged previous transaction accepted");
+  else
+    PASS();
+
+  wally_tx_free(forged);
+  wally_psbt_free(psbt);
+  wally_tx_free(prev);
+}
+
+static void test_amount_understated_witness_loses(void) {
+  TEST("psbt_get_input_amount: understated witness_utxo -> INVALID, proven "
+       "value wins");
+
+  struct wally_tx *prev = NULL;
+  struct wally_psbt *psbt =
+      make_amount_psbt(REF_SPK_P2WPKH, sizeof(REF_SPK_P2WPKH), 100000, &prev);
+  if (!psbt) {
+    FAIL("make_amount_psbt");
+    return;
+  }
+  wally_psbt_set_input_utxo(psbt, 0, prev);
+  set_witness_value(psbt, 1000); /* the lie the review screen used to show */
+
+  psbt_input_amount_t a = psbt_get_input_amount(psbt, 0);
+  if (a.status != PSBT_AMOUNT_INVALID)
+    FAIL("disagreeing amounts accepted");
+  else if (a.value != 100000)
+    FAIL("reported the understated value");
+  else
+    PASS();
+
+  wally_psbt_free(psbt);
+  wally_tx_free(prev);
+}
+
+static void test_amount_audit_mixed(void) {
+  TEST("psbt_audit_input_amounts: proven input 0, asserted input 1");
+
+  struct wally_tx *prev = NULL;
+  struct wally_psbt *psbt =
+      make_amount_psbt(REF_SPK_P2WPKH, sizeof(REF_SPK_P2WPKH), 100000, &prev);
+  if (!psbt) {
+    FAIL("make_amount_psbt");
+    return;
+  }
+  wally_psbt_set_input_utxo(psbt, 0, prev);
+
+  psbt_amount_audit_t audit;
+  psbt_audit_input_amounts(psbt, &audit);
+  if (!psbt_amounts_are_proven(&audit)) {
+    FAIL("single proven input not reported as proven");
+    wally_psbt_free(psbt);
+    wally_tx_free(prev);
+    return;
+  }
+
+  /* Add a second input backed only by a witness_utxo. */
+  struct wally_tx *tx = NULL;
+  wally_psbt_get_global_tx_alloc(psbt, &tx);
+  uint8_t other_txid[32] = {0};
+  other_txid[0] = 0x77;
+  wally_tx_add_raw_input(tx, other_txid, sizeof(other_txid), 0, 0xffffffff,
+                         NULL, 0, NULL, 0);
+  struct wally_psbt *two = NULL;
+  wally_psbt_from_tx(tx, 0, 0, &two);
+  wally_tx_free(tx);
+  if (!two) {
+    FAIL("two-input rebuild");
+    wally_psbt_free(psbt);
+    wally_tx_free(prev);
+    return;
+  }
+  wally_psbt_set_input_utxo(two, 0, prev);
+  struct wally_tx_output *utxo = NULL;
+  wally_tx_output_init_alloc(50000, REF_SPK_P2WPKH, sizeof(REF_SPK_P2WPKH),
+                             &utxo);
+  wally_psbt_set_input_witness_utxo(two, 1, utxo);
+  wally_tx_output_free(utxo);
+
+  psbt_audit_input_amounts(two, &audit);
+  if (audit.num_inputs != 2 || audit.proven != 1 || audit.asserted != 1)
+    FAIL("wrong audit counts");
+  else if (psbt_amounts_are_proven(&audit))
+    FAIL("mixed audit reported as proven");
+  else if (audit.first_unproven != 1)
+    FAIL("wrong first_unproven index");
+  else
+    PASS();
+
+  wally_psbt_free(two);
+  wally_psbt_free(psbt);
+  wally_tx_free(prev);
+}
+
+/* ================================================================
+ * Sighash and fee-percentage tests
+ * ================================================================ */
+
+static struct wally_psbt *make_unsafe_psbt(void);
+
+static void test_sighash_supported_set(void) {
+  TEST("psbt_sighash_is_supported: only unset and ALL");
+
+  if (!psbt_sighash_is_supported(0))
+    FAIL("unset/DEFAULT rejected");
+  else if (!psbt_sighash_is_supported(WALLY_SIGHASH_ALL))
+    FAIL("ALL rejected");
+  else if (psbt_sighash_is_supported(WALLY_SIGHASH_NONE) ||
+           psbt_sighash_is_supported(WALLY_SIGHASH_SINGLE) ||
+           psbt_sighash_is_supported(WALLY_SIGHASH_ALL |
+                                     WALLY_SIGHASH_ANYONECANPAY))
+    FAIL("non-ALL flag accepted");
+  else
+    PASS();
+}
+
+static void test_sighash_audit_flags_input(void) {
+  TEST("psbt_audit_sighash: SIGHASH_NONE input is reported");
+
+  struct wally_tx *prev = NULL;
+  struct wally_psbt *psbt =
+      make_amount_psbt(REF_SPK_P2WPKH, sizeof(REF_SPK_P2WPKH), 100000, &prev);
+  if (!psbt) {
+    FAIL("make_amount_psbt");
+    return;
+  }
+
+  psbt_sighash_audit_t audit;
+  psbt_audit_sighash(psbt, &audit);
+  if (audit.unsupported != 0) {
+    FAIL("clean PSBT flagged");
+    wally_psbt_free(psbt);
+    wally_tx_free(prev);
+    return;
+  }
+
+  wally_psbt_set_input_sighash(psbt, 0, WALLY_SIGHASH_NONE);
+  psbt_audit_sighash(psbt, &audit);
+  if (audit.unsupported != 1)
+    FAIL("SIGHASH_NONE not flagged");
+  else if (audit.first_unsupported != 0)
+    FAIL("wrong input index");
+  else if (strcmp(psbt_sighash_name(audit.first_sighash), "NONE") != 0)
+    FAIL("wrong sighash name");
+  else
+    PASS();
+
+  wally_psbt_free(psbt);
+  wally_tx_free(prev);
+}
+
+static void test_sign_refuses_unsupported_sighash(void) {
+  TEST("psbt_sign: input asking for SIGHASH_NONE is skipped");
+
+  struct wally_psbt *psbt = make_unsafe_psbt();
+  if (!psbt) {
+    FAIL("make_unsafe_psbt");
+    return;
+  }
+  wally_psbt_set_input_sighash(psbt, 0, WALLY_SIGHASH_NONE);
+
+  psbt_sign_policy_t policy = {.allow_unsafe = true,
+                               .allow_expected_owned = true};
+  size_t n = psbt_sign(psbt, false, policy, NULL);
+  wally_psbt_free(psbt);
+
+  if (n != 0)
+    FAIL("signed an input with an unsupported sighash");
+  else
+    PASS();
+}
+
+static void test_fee_percent(void) {
+  TEST("psbt_fee_percent: integer percentage of inputs");
+
+  if (psbt_fee_percent(1000, 0) != 0)
+    FAIL("zero inputs should give 0");
+  else if (psbt_fee_percent(10000, 100000) != 10)
+    FAIL("10% miscomputed");
+  else if (psbt_fee_percent(9999, 100000) != 9)
+    FAIL("truncation wrong");
+  else if (psbt_fee_percent(2100000000000000ULL, 2100000000000000ULL) != 100)
+    FAIL("full-supply case overflowed");
+  else
+    PASS();
+}
+
+static void test_dust_threshold(void) {
+  TEST("psbt_output_dust_threshold: Core's per-script-type values");
+
+  const uint8_t p2wpkh[22] = {0x00, 0x14};
+  const uint8_t p2wsh[34] = {0x00, 0x20};
+  const uint8_t p2tr[34] = {0x51, 0x20};
+  const uint8_t p2pkh[25] = {0x76, 0xa9, 0x14};
+  const uint8_t p2sh[23] = {0xa9, 0x14};
+  const uint8_t op_return[] = {0x6a, 0x02, 0xde, 0xad};
+
+  if (psbt_output_dust_threshold(p2wpkh, sizeof(p2wpkh)) != 294)
+    FAIL("p2wpkh should be 294");
+  else if (psbt_output_dust_threshold(p2wsh, sizeof(p2wsh)) != 330)
+    FAIL("p2wsh should be 330");
+  else if (psbt_output_dust_threshold(p2tr, sizeof(p2tr)) != 330)
+    FAIL("p2tr should be 330");
+  else if (psbt_output_dust_threshold(p2pkh, sizeof(p2pkh)) != 546)
+    FAIL("p2pkh should be 546");
+  else if (psbt_output_dust_threshold(p2sh, sizeof(p2sh)) != 540)
+    FAIL("p2sh should be 540");
+  else if (psbt_output_dust_threshold(op_return, sizeof(op_return)) != 0)
+    FAIL("OP_RETURN is unspendable, never dust");
+  else if (psbt_output_dust_threshold(NULL, 0) != 0)
+    FAIL("no script should be 0");
+  else
+    PASS();
+}
+
+static void test_total_output_value(void) {
+  TEST("psbt_total_output_value: sums outputs at either PSBT version");
+
+  struct wally_tx *tx = NULL;
+  if (wally_tx_init_alloc(2, 0, 1, 2, &tx) != WALLY_OK) {
+    FAIL("tx_init_alloc");
+    return;
+  }
+  uint8_t txid[32] = {0xaa};
+  wally_tx_add_raw_input(tx, txid, sizeof(txid), 0, 0xffffffff, NULL, 0, NULL,
+                         0);
+  wally_tx_add_raw_output(tx, 90000, REF_SPK_P2WPKH, sizeof(REF_SPK_P2WPKH), 0);
+  wally_tx_add_raw_output(tx, 5000, REF_SPK_P2WPKH, sizeof(REF_SPK_P2WPKH), 0);
+
+  struct wally_psbt *psbt = NULL;
+  int ret = wally_psbt_from_tx(tx, 0, 0, &psbt);
+  wally_tx_free(tx);
+  if (ret != WALLY_OK) {
+    FAIL("psbt_from_tx");
+    return;
+  }
+
+  uint64_t total = 0;
+  if (!psbt_total_output_value(psbt, &total))
+    FAIL("should read a v0 transaction");
+  else if (total != 95000)
+    FAIL("wrong v0 total");
+  else if (wally_psbt_set_version(psbt, 0, WALLY_PSBT_VERSION_2) != WALLY_OK)
+    FAIL("could not convert the fixture to v2");
+  else if (!psbt_total_output_value(psbt, &total))
+    FAIL("should read a v2 PSBT too");
+  else if (total != 95000)
+    FAIL("v2 total should match v0");
+  else
+    PASS();
+
+  wally_psbt_free(psbt);
+}
+
+/* An OWNED_SAFE single-sig fixture: p2wpkh input on the whitelisted BIP84
+ * path, so the signing policy clears it with no opt-in. */
+static struct wally_psbt *make_safe_psbt(void) {
+  struct ext_key *derived = NULL;
+  if (!key_get_derived_key("m/84'/0'/0'/0/0", &derived))
+    return NULL;
+
+  uint8_t kp_val[] = {
+      0x00, 0x00, 0x00, 0x00, /* fp = 00000000 (stub) */
+      0x54, 0x00, 0x00, 0x80, /* 84' */
+      0x00, 0x00, 0x00, 0x80, /* 0'  */
+      0x00, 0x00, 0x00, 0x80, /* 0'  */
+      0x00, 0x00, 0x00, 0x00, /* 0 (chain) */
+      0x00, 0x00, 0x00, 0x00, /* 0 (index) */
+  };
+
+  struct wally_psbt *psbt =
+      make_test_psbt(REF_SPK_P2WPKH, sizeof(REF_SPK_P2WPKH), derived->pub_key,
+                     sizeof(derived->pub_key), kp_val, sizeof(kp_val));
+  bip32_key_free(derived);
+  return psbt;
+}
+
+/* Same wallet, but the owned key is on an output so psbt_classify_output has
+ * something to recognise. */
+static struct wally_psbt *make_owned_output_psbt(void) {
+  struct ext_key *derived = NULL;
+  if (!key_get_derived_key("m/84'/0'/0'/0/0", &derived))
+    return NULL;
+
+  uint8_t kp_val[] = {
+      0x00, 0x00, 0x00, 0x00, /* fp = 00000000 (stub) */
+      0x54, 0x00, 0x00, 0x80, /* 84' */
+      0x00, 0x00, 0x00, 0x80, /* 0'  */
+      0x00, 0x00, 0x00, 0x80, /* 0'  */
+      0x00, 0x00, 0x00, 0x00, /* 0 (chain) */
+      0x00, 0x00, 0x00, 0x00, /* 0 (index) */
+  };
+
+  struct wally_tx *tx = NULL;
+  if (wally_tx_init_alloc(2, 0, 1, 1, &tx) != WALLY_OK) {
+    bip32_key_free(derived);
+    return NULL;
+  }
+  uint8_t txid[32] = {0};
+  wally_tx_add_raw_input(tx, txid, sizeof(txid), 0, 0xffffffff, NULL, 0, NULL,
+                         0);
+  wally_tx_add_raw_output(tx, 50000, REF_SPK_P2WPKH, sizeof(REF_SPK_P2WPKH), 0);
+
+  struct wally_psbt *psbt = NULL;
+  int ret = wally_psbt_from_tx(tx, 0, 0, &psbt);
+  wally_tx_free(tx);
+  if (ret != WALLY_OK) {
+    bip32_key_free(derived);
+    return NULL;
+  }
+
+  wally_map_add(&psbt->outputs[0].keypaths, derived->pub_key, EC_PUBLIC_KEY_LEN,
+                kp_val, sizeof(kp_val));
+  bip32_key_free(derived);
+  return psbt;
+}
+
+/* A v2 PSBT holds no global transaction: outputs live in per-output fields.
+ * Classification has to see through that, or every output of a v2 PSBT reads
+ * as somebody else's. */
+static void test_classify_output_psbt_v2(void) {
+  TEST("psbt_classify_output: works on a v2 PSBT");
+
+  struct wally_psbt *psbt = make_owned_output_psbt();
+  if (!psbt) {
+    FAIL("make_owned_output_psbt");
+    return;
+  }
+
+  output_ownership_t v0 = psbt_classify_output(psbt, 0, false);
+  if (v0.ownership != PSBT_OWNERSHIP_OWNED_SAFE) {
+    FAIL("fixture should classify OWNED_SAFE at v0");
+    wally_psbt_free(psbt);
+    return;
+  }
+
+  if (wally_psbt_set_version(psbt, 0, WALLY_PSBT_VERSION_2) != WALLY_OK)
+    FAIL("could not convert the fixture to v2");
+  else {
+    output_ownership_t v2 = psbt_classify_output(psbt, 0, false);
+    if (v2.ownership != PSBT_OWNERSHIP_OWNED_SAFE)
+      FAIL("v2 output should classify the same as v0");
+    else if (v2.source.kind != v0.source.kind ||
+             v2.source.whitelist.index != v0.source.whitelist.index)
+      FAIL("v2 claim differs from the v0 one");
+    else
+      PASS();
+  }
+
+  wally_psbt_free(psbt);
+}
+
+/* Two inputs spending the same address: one key, two UTXOs. Every field is
+ * identical except the prevout txid, which is what address reuse looks like
+ * on the wire. */
+static struct wally_psbt *make_reused_address_psbt(void) {
+  struct ext_key *derived = NULL;
+  if (!key_get_derived_key("m/84'/0'/0'/0/0", &derived))
+    return NULL;
+
+  const uint8_t kp_val[] = {
+      0x00, 0x00, 0x00, 0x00, /* fp = 00000000 (stub) */
+      0x54, 0x00, 0x00, 0x80, /* 84' */
+      0x00, 0x00, 0x00, 0x80, /* 0'  */
+      0x00, 0x00, 0x00, 0x80, /* 0'  */
+      0x00, 0x00, 0x00, 0x00, /* 0 (chain) */
+      0x00, 0x00, 0x00, 0x00, /* 0 (index) */
+  };
+
+  struct wally_tx *tx = NULL;
+  if (wally_tx_init_alloc(2, 0, 2, 1, &tx) != WALLY_OK) {
+    bip32_key_free(derived);
+    return NULL;
+  }
+  uint8_t txid_a[32] = {0xa1};
+  uint8_t txid_b[32] = {0xb2};
+  wally_tx_add_raw_input(tx, txid_a, sizeof(txid_a), 0, 0xffffffff, NULL, 0,
+                         NULL, 0);
+  wally_tx_add_raw_input(tx, txid_b, sizeof(txid_b), 2, 0xffffffff, NULL, 0,
+                         NULL, 0);
+  const uint8_t op_return[] = {0x6a};
+  wally_tx_add_raw_output(tx, 0, op_return, sizeof(op_return), 0);
+
+  struct wally_psbt *psbt = NULL;
+  int ret = wally_psbt_from_tx(tx, 0, 0, &psbt);
+  wally_tx_free(tx);
+  if (ret != WALLY_OK) {
+    bip32_key_free(derived);
+    return NULL;
+  }
+
+  for (size_t i = 0; i < 2; i++) {
+    struct wally_tx_output *utxo = NULL;
+    wally_tx_output_init_alloc(100000, REF_SPK_P2WPKH, sizeof(REF_SPK_P2WPKH),
+                               &utxo);
+    wally_psbt_set_input_witness_utxo(psbt, i, utxo);
+    wally_tx_output_free(utxo);
+    wally_map_add(&psbt->inputs[i].keypaths, derived->pub_key,
+                  sizeof(derived->pub_key), kp_val, sizeof(kp_val));
+  }
+
+  bip32_key_free(derived);
+  return psbt;
+}
+
+/* Regression: one wally_psbt_sign() call signs every input naming the key it
+ * was handed, so signing input 0 also signs input 1 when both sit on the same
+ * address. Counting per call saw input 1 gain nothing on its own turn and
+ * reported it unsigned, warning the user that a fully signed PSBT was
+ * incomplete. */
+static void test_sign_counts_reused_address(void) {
+  TEST("psbt_sign: both inputs on a reused address count as signed");
+
+  struct wally_psbt *psbt = make_reused_address_psbt();
+  if (!psbt) {
+    FAIL("make_reused_address_psbt");
+    return;
+  }
+
+  psbt_sign_policy_t policy = {0};
+  psbt_sign_result_t result;
+  const size_t added = psbt_sign(psbt, false, policy, &result);
+
+  size_t sigs0 = 0, sigs1 = 0;
+  wally_psbt_get_input_signatures_size(psbt, 0, &sigs0);
+  wally_psbt_get_input_signatures_size(psbt, 1, &sigs1);
+
+  if (!added)
+    FAIL("the signing pass did nothing");
+  else if (!sigs0 || !sigs1)
+    FAIL("libwally should have signed both inputs on the shared address");
+  else if (result.attempted != 2)
+    FAIL("both inputs should have been attempted");
+  else if (result.signed_ok != 2)
+    FAIL("both inputs are signed, so both must be counted");
+  else if (result.blocked)
+    FAIL("nothing was policy-denied here");
+  else
+    PASS();
+
+  wally_psbt_free(psbt);
+}
+
+/* BIP-370: once a non-ANYONECANPAY / non-NONE signature is present the input
+ * and output sets are pinned. libwally does not do this on its signing path,
+ * so psbt_sign() has to. */
+static void test_sign_clears_tx_modifiable(void) {
+  TEST("psbt_sign: clears BIP-370 tx-modifiable flags on a v2 PSBT");
+
+  struct wally_psbt *psbt = make_safe_psbt();
+  if (!psbt) {
+    FAIL("make_safe_psbt");
+    return;
+  }
+  if (wally_psbt_set_version(psbt, 0, WALLY_PSBT_VERSION_2) != WALLY_OK) {
+    FAIL("could not convert the fixture to v2");
+    wally_psbt_free(psbt);
+    return;
+  }
+
+  size_t before = 0;
+  if (wally_psbt_get_tx_modifiable_flags(psbt, &before) != WALLY_OK ||
+      !(before & (WALLY_PSBT_TXMOD_INPUTS | WALLY_PSBT_TXMOD_OUTPUTS))) {
+    FAIL("upgrade should have left the PSBT marked modifiable");
+    wally_psbt_free(psbt);
+    return;
+  }
+
+  psbt_sign_policy_t policy = {0};
+  psbt_sign_result_t result;
+  size_t added = psbt_sign(psbt, false, policy, &result);
+
+  size_t after = 0;
+  if (!added || !result.signed_ok)
+    FAIL("v2 PSBT should still sign");
+  else if (wally_psbt_get_tx_modifiable_flags(psbt, &after) != WALLY_OK)
+    FAIL("flags unreadable after signing");
+  else if (after & WALLY_PSBT_TXMOD_INPUTS)
+    FAIL("Inputs Modifiable must be cleared after a non-ACP signature");
+  else if (after & WALLY_PSBT_TXMOD_OUTPUTS)
+    FAIL("Outputs Modifiable must be cleared after a non-NONE signature");
+  else
+    PASS();
+
+  wally_psbt_free(psbt);
+}
+
+/* A v2 PSBT can hold per-output amounts that no valid transaction could
+ * carry. psbt_tx_alloc must fail rather than hand the review screen a
+ * transaction built from them. */
+static void test_tx_alloc_rejects_bad_amount(void) {
+  TEST("psbt_tx_alloc: refuses a v2 PSBT with an out-of-range amount");
+
+  struct wally_psbt *psbt = make_owned_output_psbt();
+  if (!psbt) {
+    FAIL("make_owned_output_psbt");
+    return;
+  }
+  if (wally_psbt_set_version(psbt, 0, WALLY_PSBT_VERSION_2) != WALLY_OK) {
+    FAIL("could not convert the fixture to v2");
+    wally_psbt_free(psbt);
+    return;
+  }
+
+  struct wally_tx *ok = psbt_tx_alloc(psbt);
+  if (!ok) {
+    FAIL("the untampered v2 fixture should build");
+    wally_psbt_free(psbt);
+    return;
+  }
+  wally_tx_free(ok);
+
+  psbt->outputs[0].amount = UINT64_MAX;
+  struct wally_tx *bad = psbt_tx_alloc(psbt);
+  if (bad) {
+    FAIL("an out-of-range amount must not build a transaction");
+    wally_tx_free(bad);
+  } else
+    PASS();
+
+  wally_psbt_free(psbt);
+}
+
+/* Trim rebuilds from a transaction, which can only produce v0. Declining is
+ * what keeps a v2 export from being silently downgraded or having its
+ * signer-set flags rewritten by an upgrade. */
+static void test_trim_declines_psbt_v2(void) {
+  TEST("psbt_trim: declines a v2 PSBT so it exports untrimmed");
+
+  struct wally_psbt *psbt = make_safe_psbt();
+  if (!psbt) {
+    FAIL("make_safe_psbt");
+    return;
+  }
+
+  struct wally_psbt *trimmed = psbt_trim(psbt);
+  if (!trimmed) {
+    FAIL("v0 PSBT should trim");
+    wally_psbt_free(psbt);
+    return;
+  }
+  wally_psbt_free(trimmed);
+
+  if (wally_psbt_set_version(psbt, 0, WALLY_PSBT_VERSION_2) != WALLY_OK)
+    FAIL("could not convert the fixture to v2");
+  else if ((trimmed = psbt_trim(psbt)) != NULL) {
+    FAIL("v2 PSBT must not be trimmed");
+    wally_psbt_free(trimmed);
+  } else
+    PASS();
+
+  wally_psbt_free(psbt);
+}
+
+/* ================================================================
  * psbt_sign policy-gate tests
  *
  * Verify that psbt_sign() refuses to produce signatures for
@@ -1164,7 +1879,7 @@ static void test_psbt_sign_gate_unsafe_blocked(void) {
 
   psbt_sign_policy_t policy = {.allow_unsafe = false,
                                .allow_expected_owned = false};
-  size_t n = psbt_sign(psbt, false, policy);
+  size_t n = psbt_sign(psbt, false, policy, NULL);
   wally_psbt_free(psbt);
 
   if (n != 0) {
@@ -1185,7 +1900,7 @@ static void test_psbt_sign_gate_unsafe_allowed(void) {
 
   psbt_sign_policy_t policy = {.allow_unsafe = true,
                                .allow_expected_owned = false};
-  size_t n = psbt_sign(psbt, false, policy);
+  size_t n = psbt_sign(psbt, false, policy, NULL);
   wally_psbt_free(psbt);
 
   if (n != 1) {
@@ -1206,7 +1921,7 @@ static void test_psbt_sign_gate_expected_blocked(void) {
 
   psbt_sign_policy_t policy = {.allow_unsafe = false,
                                .allow_expected_owned = false};
-  size_t n = psbt_sign(psbt, false, policy);
+  size_t n = psbt_sign(psbt, false, policy, NULL);
   wally_psbt_free(psbt);
 
   if (n != 0) {
@@ -1243,7 +1958,7 @@ static void test_psbt_sign_gate_external_always_skipped(void) {
 
   psbt_sign_policy_t policy = {.allow_unsafe = true,
                                .allow_expected_owned = true};
-  size_t n = psbt_sign(psbt, false, policy);
+  size_t n = psbt_sign(psbt, false, policy, NULL);
   wally_psbt_free(psbt);
 
   if (n != 0) {
@@ -1550,13 +2265,79 @@ static void test_psbt_classify_multi_input_mixed(void) {
        "input");
   psbt_sign_policy_t policy = {.allow_unsafe = true,
                                .allow_expected_owned = true};
-  size_t n = psbt_sign(psbt, false, policy);
+  size_t n = psbt_sign(psbt, false, policy, NULL);
   wally_psbt_free(psbt);
   if (n != 1) {
     FAIL("expected exactly 1 signature on the mixed PSBT");
     return;
   }
   PASS();
+}
+
+/* The signing gate is only real if it survives libwally signing the whole
+ * PSBT at once. Input 1 here is a second UTXO at an address we own, labelled
+ * with someone else's fingerprint so it classifies EXTERNAL; its keypath still
+ * names the key input 0 signs with, so wally_psbt_sign() reaches it. */
+static void test_psbt_sign_denied_input_keeps_no_signature(void) {
+  TEST("psbt_sign: denied input naming our key keeps no signature");
+
+  struct ext_key *derived = NULL;
+  if (!key_get_derived_key("m/84'/0'/0'/0/0", &derived)) {
+    FAIL("key derivation failed");
+    return;
+  }
+
+  uint8_t kp_ours[] = {
+      0x00, 0x00, 0x00, 0x00, /* our fingerprint */
+      0x54, 0x00, 0x00, 0x80, /* 84' */
+      0x00, 0x00, 0x00, 0x80, /* 0'  */
+      0x00, 0x00, 0x00, 0x80, /* 0'  */
+      0x00, 0x00, 0x00, 0x00, /* 0   */
+      0x00, 0x00, 0x00, 0x00, /* 0   */
+  };
+  uint8_t kp_foreign[sizeof(kp_ours)];
+  memcpy(kp_foreign, kp_ours, sizeof(kp_ours));
+  kp_foreign[0] = 0xDE; /* someone else's fingerprint, same key below */
+  kp_foreign[1] = 0xAD;
+  kp_foreign[2] = 0xBE;
+  kp_foreign[3] = 0xEF;
+
+  struct wally_psbt *psbt = make_two_input_psbt(
+      REF_SPK_P2WPKH, sizeof(REF_SPK_P2WPKH), derived->pub_key,
+      sizeof(derived->pub_key), kp_ours, sizeof(kp_ours), REF_SPK_P2WPKH,
+      sizeof(REF_SPK_P2WPKH), derived->pub_key, sizeof(derived->pub_key),
+      kp_foreign, sizeof(kp_foreign));
+  bip32_key_free(derived);
+  if (!psbt) {
+    FAIL("make_two_input_psbt");
+    return;
+  }
+
+  if (psbt_classify_input(psbt, 1, false).ownership !=
+      PSBT_OWNERSHIP_EXTERNAL) {
+    wally_psbt_free(psbt);
+    FAIL("input 1 should classify as EXTERNAL");
+    return;
+  }
+
+  psbt_sign_policy_t policy = {.allow_unsafe = true,
+                               .allow_expected_owned = true};
+  psbt_sign_result_t res;
+  psbt_sign(psbt, false, policy, &res);
+
+  size_t sigs0 = 0, sigs1 = 0;
+  wally_psbt_get_input_signatures_size(psbt, 0, &sigs0);
+  wally_psbt_get_input_signatures_size(psbt, 1, &sigs1);
+  wally_psbt_free(psbt);
+
+  if (sigs0 != 1)
+    FAIL("owned input was not signed");
+  else if (sigs1 != 0)
+    FAIL("denied input kept a signature");
+  else if (res.blocked != 1)
+    FAIL("discarded signature not reported");
+  else
+    PASS();
 }
 
 /* ------------------------------------------------------------------ */
@@ -1800,6 +2581,24 @@ int main(void) {
   test_psbt_classify_adv_taproot_foreign_fp();
   test_psbt_classify_adv_testnet_flag_mismatch();
 
+  printf("\n=== input amount provenance tests ===\n\n");
+
+  test_amount_missing();
+  test_amount_witness_only_asserted();
+  test_amount_prev_tx_proven();
+  test_amount_fabricated_prev_tx();
+  test_amount_understated_witness_loses();
+  test_amount_audit_mixed();
+
+  printf("\n=== sighash and fee tests ===\n\n");
+
+  test_sighash_supported_set();
+  test_sighash_audit_flags_input();
+  test_sign_refuses_unsupported_sighash();
+  test_fee_percent();
+  test_dust_threshold();
+  test_total_output_value();
+
   printf("\n=== psbt_sign policy-gate tests ===\n\n");
 
   test_psbt_sign_gate_unsafe_blocked();
@@ -1807,10 +2606,19 @@ int main(void) {
   test_psbt_sign_gate_expected_blocked();
   test_psbt_sign_gate_external_always_skipped();
   test_psbt_classify_multi_input_mixed();
+  test_psbt_sign_denied_input_keeps_no_signature();
   test_psbt_classify_registry_wsh_owned();
   test_psbt_classify_registry_wsh_tampered_witness();
   test_psbt_classify_registry_miniscript_owned();
   test_psbt_classify_registry_miniscript_tampered();
+
+  printf("\n=== PSBTv2 tests ===\n\n");
+
+  test_classify_output_psbt_v2();
+  test_sign_clears_tx_modifiable();
+  test_sign_counts_reused_address();
+  test_tx_alloc_rejects_bad_amount();
+  test_trim_declines_psbt_v2();
 
   key_unload();
 

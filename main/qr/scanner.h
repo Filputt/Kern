@@ -1,18 +1,16 @@
 /*
  * QR Scanner Page Header
- * Displays a 480x480 frame buffer that changes colors every second
+ * Live camera preview with background QR decoding; assembles multi-part
+ * payloads (pMofN, UR, BBQr) and exposes the completed content to the caller.
  */
 
 #ifndef QR_SCANNER_H
 #define QR_SCANNER_H
 
 #include "../components/video/video.h"
+#include "../utils/attributes.h"
 #include <lvgl.h>
 #include <stdbool.h>
-
-#ifdef K_QUIRC_DEBUG
-#define QR_PERF_DEBUG
-#endif
 
 /**
  * @brief Create the QR scanner page
@@ -43,7 +41,7 @@ void qr_scanner_page_destroy(void);
  * @return Completed QR content string (caller must free), or NULL if no
  * completed content
  */
-char *qr_scanner_get_completed_content(void);
+KERN_WARN_UNUSED_RESULT char *qr_scanner_get_completed_content(void);
 
 /**
  * @brief Get completed QR content with length information
@@ -55,14 +53,15 @@ char *qr_scanner_get_completed_content(void);
  * @return Completed QR content (caller must free), or NULL if no completed
  * content
  */
-char *qr_scanner_get_completed_content_with_len(size_t *content_len);
+KERN_WARN_UNUSED_RESULT char *
+qr_scanner_get_completed_content_with_len(size_t *content_len);
 
 /**
  * @brief Check if QR scanner is fully initialized and ready
  *
  * @return true if scanner is ready, false otherwise
  */
-bool qr_scanner_is_ready(void);
+KERN_WARN_UNUSED_RESULT bool qr_scanner_is_ready(void);
 
 /**
  * @brief Check if the scanner has completed QR content
@@ -70,7 +69,7 @@ bool qr_scanner_is_ready(void);
  * @return true if a QR was fully scanned, false if the scanner was canceled or
  * no complete QR is available yet
  */
-bool qr_scanner_has_completed_result(void);
+KERN_WARN_UNUSED_RESULT bool qr_scanner_has_completed_result(void);
 
 /**
  * @brief Get the detected QR code format
@@ -78,7 +77,15 @@ bool qr_scanner_has_completed_result(void);
  * @return QR format constant (FORMAT_NONE, FORMAT_PMOFN, FORMAT_UR, etc.)
  *         Returns -1 if no format detected yet
  */
-int qr_scanner_get_format(void);
+KERN_WARN_UNUSED_RESULT int qr_scanner_get_format(void);
+
+/**
+ * @brief Get the BBQr file type character (for FORMAT_BBQR only)
+ *
+ * @return File type character (e.g. 'P' for PSBT, 'U' for unicode text),
+ *         or 0 if the scanned format is not BBQr
+ */
+char qr_scanner_get_bbqr_file_type(void);
 
 /**
  * @brief Get UR result data (for UR format QR codes only)
@@ -91,8 +98,8 @@ int qr_scanner_get_format(void);
  * @param cbor_len_out Pointer to store CBOR data length
  * @return true on success, false on failure
  */
-bool qr_scanner_get_ur_result(const char **ur_type_out,
-                              const uint8_t **cbor_data_out,
-                              size_t *cbor_len_out);
+KERN_WARN_UNUSED_RESULT bool
+qr_scanner_get_ur_result(const char **ur_type_out,
+                         const uint8_t **cbor_data_out, size_t *cbor_len_out);
 
 #endif // QR_SCANNER_H

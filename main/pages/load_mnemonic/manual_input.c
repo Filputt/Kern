@@ -41,6 +41,7 @@ static int filtered_count = 0;
 static input_mode_t current_mode = MODE_WORD_COUNT_SELECT;
 static char pending_word[16] = {0};
 static bool checksum_filter_mode = false;
+static bool word_count_preselected = false;
 
 static void word_confirmation_cb(bool confirmed, void *user_data);
 static void create_word_count_menu(void);
@@ -308,7 +309,12 @@ static void back_cb(void) {
       entered_words[current_word_index][0] = '\0';
       update_keyboard_state();
     } else {
-      create_word_count_menu();
+      if (word_count_preselected) {
+        if (return_callback)
+          return_callback();
+      } else {
+        create_word_count_menu();
+      }
     }
     break;
 
@@ -335,11 +341,11 @@ static void finish_mnemonic(void) {
   mnemonic_editor_page_show();
 }
 
-void manual_input_page_create(lv_obj_t *parent, void (*return_cb)(void),
-                              void (*success_cb)(void),
-                              bool checksum_filter_last_word) {
+static bool create_page(lv_obj_t *parent, void (*return_cb)(void),
+                        void (*success_cb)(void),
+                        bool checksum_filter_last_word) {
   if (!parent)
-    return;
+    return false;
 
   return_callback = return_cb;
   success_callback = success_cb;
@@ -347,7 +353,7 @@ void manual_input_page_create(lv_obj_t *parent, void (*return_cb)(void),
 
   if (!bip39_filter_init()) {
     dialog_show_error_timeout("Failed to load wordlist", return_cb, 0);
-    return;
+    return false;
   }
 
   total_words = 0;
@@ -359,7 +365,32 @@ void manual_input_page_create(lv_obj_t *parent, void (*return_cb)(void),
   bip39_filter_clear_last_word_cache();
 
   manual_input_screen = theme_create_page_container(parent);
+  return manual_input_screen != NULL;
+}
+
+void manual_input_page_create(lv_obj_t *parent, void (*return_cb)(void),
+                              void (*success_cb)(void),
+                              bool checksum_filter_last_word) {
+  word_count_preselected = false;
+  if (!create_page(parent, return_cb, success_cb, checksum_filter_last_word))
+    return;
+
   create_word_count_menu();
+}
+
+void manual_input_page_create_with_word_count(lv_obj_t *parent,
+                                              void (*return_cb)(void),
+                                              void (*success_cb)(void),
+                                              bool checksum_filter_last_word,
+                                              int word_count) {
+  if (word_count != 12 && word_count != 24)
+    return;
+
+  word_count_preselected = true;
+  if (!create_page(parent, return_cb, success_cb, checksum_filter_last_word))
+    return;
+
+  on_word_count_selected(word_count);
 }
 
 void manual_input_page_show(void) {
@@ -401,5 +432,6 @@ void manual_input_page_destroy(void) {
   filtered_count = 0;
   current_mode = MODE_WORD_COUNT_SELECT;
   checksum_filter_mode = false;
+  word_count_preselected = false;
   bip39_filter_clear_last_word_cache();
 }

@@ -5,6 +5,7 @@
 #include "script_templates.h"
 #include "wallet.h"
 #include <esp_log.h>
+#include <stdlib.h>
 #include <string.h>
 #include <wally_bip32.h>
 #include <wally_core.h>
@@ -22,17 +23,246 @@ static const char *TAG = "PSBT";
 #define PSBT_PRIVATE static
 #endif
 
-uint64_t psbt_get_input_value(const struct wally_psbt *psbt, size_t index) {
-  struct wally_tx_output *utxo = NULL;
-  uint64_t value = 0;
+/* Locate the output a non_witness_utxo claims to fund, after checking that the
+ * transaction really is the one this input spends. libwally applies the same
+ * txid check when it signs a legacy input (get_scriptcode), but never on the
+ * path that reports amounts, so the fee could be read off a fabricated
+ * previous transaction that signing would later reject. */
+static const struct wally_tx_output *
+verified_prevout(const struct wally_psbt *psbt, size_t index,
+                 const struct wally_tx *prev) {
+  unsigned char declared[WALLY_TXHASH_LEN];
+  unsigned char actual[WALLY_TXHASH_LEN];
+  uint32_t vout = 0;
 
-  if (wally_psbt_get_input_best_utxo_alloc(psbt, index, &utxo) == WALLY_OK &&
-      utxo) {
-    value = utxo->satoshi;
-    wally_tx_output_free(utxo);
+  if (wally_psbt_get_input_previous_txid(psbt, index, declared,
+                                         sizeof(declared)) != WALLY_OK ||
+      wally_tx_get_txid(prev, actual, sizeof(actual)) != WALLY_OK ||
+      memcmp(declared, actual, sizeof(actual)) != 0)
+    return NULL;
+
+  if (wally_psbt_get_input_output_index(psbt, index, &vout) != WALLY_OK ||
+      vout >= prev->num_outputs)
+    return NULL;
+
+  return &prev->outputs[vout];
+}
+
+static bool prevout_matches_witness(const struct wally_tx_output *prevout,
+                                    const struct wally_tx_output *witness) {
+  return prevout->satoshi == witness->satoshi &&
+         prevout->script_len == witness->script_len &&
+         (prevout->script_len == 0 ||
+          memcmp(prevout->script, witness->script, prevout->script_len) == 0);
+}
+
+psbt_input_amount_t psbt_get_input_amount(const struct wally_psbt *psbt,
+                                          size_t index) {
+  psbt_input_amount_t result = {.status = PSBT_AMOUNT_MISSING, .value = 0};
+
+  struct wally_tx_output *witness = NULL;
+  if (wally_psbt_get_input_witness_utxo_alloc(psbt, index, &witness) !=
+      WALLY_OK)
+    witness = NULL;
+
+  struct wally_tx *prev = NULL;
+  if (wally_psbt_get_input_utxo_alloc(psbt, index, &prev) != WALLY_OK)
+    prev = NULL;
+
+  if (prev) {
+    const struct wally_tx_output *prevout = verified_prevout(psbt, index, prev);
+    if (!prevout) {
+      /* A previous transaction was supplied but it is not the one being
+       * spent. Nothing here is trustworthy; fall back to the witness value
+       * only so the review screen still shows the number signing would use. */
+      result.status = PSBT_AMOUNT_INVALID;
+      result.value = witness ? witness->satoshi : 0;
+    } else if (witness && !prevout_matches_witness(prevout, witness)) {
+      result.status = PSBT_AMOUNT_INVALID;
+      result.value = prevout->satoshi; /* the proven side wins for display */
+    } else {
+      result.status = PSBT_AMOUNT_PROVEN;
+      result.value = prevout->satoshi;
+    }
+  } else if (witness) {
+    result.status = PSBT_AMOUNT_ASSERTED;
+    result.value = witness->satoshi;
   }
 
-  return value;
+  if (witness)
+    wally_tx_output_free(witness);
+  if (prev)
+    wally_tx_free(prev);
+
+  return result;
+}
+
+void psbt_audit_input_amounts(const struct wally_psbt *psbt,
+                              psbt_amount_audit_t *out) {
+  if (!out)
+    return;
+
+  memset(out, 0, sizeof(*out));
+  if (!psbt || wally_psbt_get_num_inputs(psbt, &out->num_inputs) != WALLY_OK)
+    out->num_inputs = 0;
+
+  out->first_unproven = out->num_inputs;
+  out->first_invalid = out->num_inputs;
+
+  for (size_t i = 0; i < out->num_inputs; i++) {
+    psbt_input_amount_t amount = psbt_get_input_amount(psbt, i);
+    out->total += amount.value;
+    switch (amount.status) {
+    case PSBT_AMOUNT_PROVEN:
+      out->proven++;
+      continue;
+    case PSBT_AMOUNT_ASSERTED:
+      out->asserted++;
+      break;
+    case PSBT_AMOUNT_INVALID:
+      out->invalid++;
+      if (out->first_invalid == out->num_inputs)
+        out->first_invalid = i;
+      break;
+    case PSBT_AMOUNT_MISSING:
+      out->missing++;
+      break;
+    }
+    if (out->first_unproven == out->num_inputs)
+      out->first_unproven = i;
+  }
+}
+
+uint64_t psbt_get_input_value(const struct wally_psbt *psbt, size_t index) {
+  return psbt_get_input_amount(psbt, index).value;
+}
+
+/* 21 million BTC. libwally already rejects a transaction whose outputs exceed
+ * the supply, so this only backstops a total assembled some other way -- but
+ * it is what keeps the sum below from silently wrapping. */
+#define PSBT_MAX_SATOSHI (21000000ull * WALLY_SATOSHI_PER_BTC)
+
+bool psbt_total_output_value(const struct wally_psbt *psbt, uint64_t *out) {
+  if (!psbt || !out)
+    return false;
+  *out = 0;
+
+  struct wally_tx *tx = psbt_tx_alloc(psbt);
+  if (!tx)
+    return false;
+
+  uint64_t total = 0;
+  bool ok = true;
+  for (size_t i = 0; i < tx->num_outputs && ok; i++) {
+    uint64_t value = tx->outputs[i].satoshi;
+    if (value > PSBT_MAX_SATOSHI || total > PSBT_MAX_SATOSHI - value)
+      ok = false;
+    else
+      total += value;
+  }
+  wally_tx_free(tx);
+
+  if (ok)
+    *out = total;
+  return ok;
+}
+
+struct wally_tx *psbt_tx_alloc(const struct wally_psbt *psbt) {
+  struct wally_tx *tx = NULL;
+  if (!psbt ||
+      wally_psbt_extract(psbt, WALLY_PSBT_EXTRACT_NON_FINAL, &tx) != WALLY_OK)
+    return NULL;
+  return tx;
+}
+
+/* True when this PSBT keeps BIP-370's tx-modifiable flags. v0 has no such
+ * field: it is implicitly modifiable until finalized. */
+static bool psbt_is_v2(const struct wally_psbt *psbt) {
+  size_t version = 0;
+  return psbt && wally_psbt_get_version(psbt, &version) == WALLY_OK &&
+         version == WALLY_PSBT_VERSION_2;
+}
+
+/* Bitcoin Core's IsWitnessProgram: OP_0 or OP_1..OP_16, then a single push of
+ * 2..40 bytes making up the whole script. */
+static bool spk_is_witness_program(const unsigned char *spk, size_t spk_len) {
+  if (spk_len < 4 || spk_len > 42)
+    return false;
+  if (spk[0] != OP_0 && (spk[0] < OP_1 || spk[0] > OP_16))
+    return false;
+  return (size_t)spk[1] + 2 == spk_len;
+}
+
+uint64_t psbt_output_dust_threshold(const unsigned char *spk, size_t spk_len) {
+  if (!spk || !spk_len || spk[0] == OP_RETURN)
+    return 0; /* provably unspendable: never dust */
+
+  /* Core's GetDustThreshold: the serialized output plus the cheapest input
+   * that could spend it, priced at the 3000 sat/kvB dust relay fee. The input
+   * side is 67 bytes for a witness program (the witness is discounted) and
+   * 148 for everything else. Yields the familiar 294 / 330 / 546 thresholds. */
+  size_t size = 8 + 1 + spk_len; /* value + script length + script */
+  size += spk_is_witness_program(spk, spk_len) ? 67 : 148;
+  return (uint64_t)size * 3000u / 1000u;
+}
+
+bool psbt_sighash_is_supported(uint32_t sighash) {
+  /* 0 is both the "no PSBT_IN_SIGHASH_TYPE field" encoding and taproot's
+   * SIGHASH_DEFAULT; either way libwally signs with ALL semantics. */
+  return sighash == 0 || sighash == WALLY_SIGHASH_ALL;
+}
+
+const char *psbt_sighash_name(uint32_t sighash) {
+  switch (sighash) {
+  case 0:
+    return "DEFAULT";
+  case WALLY_SIGHASH_ALL:
+    return "ALL";
+  case WALLY_SIGHASH_NONE:
+    return "NONE";
+  case WALLY_SIGHASH_SINGLE:
+    return "SINGLE";
+  case WALLY_SIGHASH_ALL | WALLY_SIGHASH_ANYONECANPAY:
+    return "ALL|ANYONECANPAY";
+  case WALLY_SIGHASH_NONE | WALLY_SIGHASH_ANYONECANPAY:
+    return "NONE|ANYONECANPAY";
+  case WALLY_SIGHASH_SINGLE | WALLY_SIGHASH_ANYONECANPAY:
+    return "SINGLE|ANYONECANPAY";
+  default:
+    return "unknown";
+  }
+}
+
+void psbt_audit_sighash(const struct wally_psbt *psbt,
+                        psbt_sighash_audit_t *out) {
+  if (!out)
+    return;
+
+  memset(out, 0, sizeof(*out));
+  if (!psbt || wally_psbt_get_num_inputs(psbt, &out->num_inputs) != WALLY_OK)
+    out->num_inputs = 0;
+
+  out->first_unsupported = out->num_inputs;
+
+  for (size_t i = 0; i < out->num_inputs; i++) {
+    size_t sighash = 0;
+    if (wally_psbt_get_input_sighash(psbt, i, &sighash) != WALLY_OK)
+      sighash = 0;
+    if (psbt_sighash_is_supported((uint32_t)sighash))
+      continue;
+
+    if (!out->unsupported) {
+      out->first_unsupported = i;
+      out->first_sighash = (uint32_t)sighash;
+    }
+    out->unsupported++;
+  }
+}
+
+uint32_t psbt_fee_percent(uint64_t fee, uint64_t total_input) {
+  if (!total_input)
+    return 0;
+  return (uint32_t)((fee * 100u) / total_input);
 }
 
 bool psbt_input_utxo_script(const struct wally_psbt *psbt, size_t input_i,
@@ -79,7 +309,7 @@ bool psbt_input_utxo_script(const struct wally_psbt *psbt, size_t input_i,
 
 static bool try_match_whitelist(const unsigned char *keypath,
                                 size_t keypath_len, bool is_testnet,
-                                claim_t *claim_out) {
+                                uint32_t max_index, claim_t *claim_out) {
   if (keypath_len != 4 + 5 * 4)
     return false;
 
@@ -87,7 +317,7 @@ static bool try_match_whitelist(const unsigned char *keypath,
   if (!ss_keypath_parse(keypath + 4, keypath_len - 4, &kp))
     return false;
 
-  if (!ss_keypath_is_whitelisted(&kp, is_testnet))
+  if (!ss_keypath_is_whitelisted(&kp, is_testnet, max_index))
     return false;
 
   claim_out->kind = CLAIM_WHITELIST;
@@ -248,12 +478,14 @@ static bool claim_matches_spk(const claim_t *claim, bool is_testnet,
 }
 
 static bool try_match_claim(const unsigned char *keypath, size_t keypath_len,
-                            bool is_testnet, const unsigned char *target_spk,
+                            bool is_testnet, uint32_t max_index,
+                            const unsigned char *target_spk,
                             size_t target_spk_len,
                             const struct wally_psbt *input_psbt, size_t input_i,
                             claim_t *claim_out) {
   claim_t claim = {0};
-  if (try_match_whitelist(keypath, keypath_len, is_testnet, &claim) &&
+  if (try_match_whitelist(keypath, keypath_len, is_testnet, max_index,
+                          &claim) &&
       claim_matches_spk(&claim, is_testnet, target_spk, target_spk_len,
                         input_psbt, input_i)) {
     *claim_out = claim;
@@ -350,8 +582,9 @@ input_ownership_t psbt_classify_input(const struct wally_psbt *psbt, size_t i,
     claim_t claim = {0};
     remember_raw_keypath(result.raw_keypath, sizeof(result.raw_keypath),
                          &result.raw_keypath_len, keypath, keypath_len);
-    if (try_match_claim(keypath, keypath_len, is_testnet, utxo_script,
-                        utxo_script_len, psbt, i, &claim)) {
+    if (try_match_claim(keypath, keypath_len, is_testnet,
+                        SS_ADDR_INDEX_UNCAPPED, utxo_script, utxo_script_len,
+                        psbt, i, &claim)) {
       result.ownership = PSBT_OWNERSHIP_OWNED_SAFE;
       result.claim = claim;
       return result;
@@ -373,8 +606,8 @@ input_ownership_t psbt_classify_input(const struct wally_psbt *psbt, size_t i,
     claim_t claim = {0};
     remember_raw_keypath(result.raw_keypath, sizeof(result.raw_keypath),
                          &result.raw_keypath_len, val, val_len);
-    if (try_match_claim(val, val_len, is_testnet, utxo_script, utxo_script_len,
-                        NULL, 0, &claim)) {
+    if (try_match_claim(val, val_len, is_testnet, SS_ADDR_INDEX_UNCAPPED,
+                        utxo_script, utxo_script_len, NULL, 0, &claim)) {
       result.ownership = PSBT_OWNERSHIP_OWNED_SAFE;
       result.claim = claim;
       return result;
@@ -404,9 +637,8 @@ output_ownership_t psbt_classify_output(const struct wally_psbt *psbt, size_t i,
                                         bool is_testnet) {
   output_ownership_t result = {0};
 
-  struct wally_tx *global_tx = NULL;
-  if (wally_psbt_get_global_tx_alloc(psbt, &global_tx) != WALLY_OK ||
-      !global_tx)
+  struct wally_tx *global_tx = psbt_tx_alloc(psbt);
+  if (!global_tx)
     return result;
 
   if (i >= global_tx->num_outputs) {
@@ -438,8 +670,8 @@ output_ownership_t psbt_classify_output(const struct wally_psbt *psbt, size_t i,
     claim_t claim = {0};
     remember_raw_keypath(result.raw_keypath, sizeof(result.raw_keypath),
                          &result.raw_keypath_len, keypath, keypath_len);
-    if (try_match_claim(keypath, keypath_len, is_testnet, out_script,
-                        out_script_len, NULL, 0, &claim)) {
+    if (try_match_claim(keypath, keypath_len, is_testnet, SS_MAX_OUT_ADDR_INDEX,
+                        out_script, out_script_len, NULL, 0, &claim)) {
       result.ownership = PSBT_OWNERSHIP_OWNED_SAFE;
       result.source = claim;
       wally_tx_free(global_tx);
@@ -462,8 +694,8 @@ output_ownership_t psbt_classify_output(const struct wally_psbt *psbt, size_t i,
     claim_t claim = {0};
     remember_raw_keypath(result.raw_keypath, sizeof(result.raw_keypath),
                          &result.raw_keypath_len, val, val_len);
-    if (try_match_claim(val, val_len, is_testnet, out_script, out_script_len,
-                        NULL, 0, &claim)) {
+    if (try_match_claim(val, val_len, is_testnet, SS_MAX_OUT_ADDR_INDEX,
+                        out_script, out_script_len, NULL, 0, &claim)) {
       result.ownership = PSBT_OWNERSHIP_OWNED_SAFE;
       result.source = claim;
       wally_tx_free(global_tx);
@@ -645,43 +877,211 @@ bool psbt_format_keypath(const unsigned char *raw_keypath,
                                    MAX_KEYPATH_TOTAL_DEPTH);
 }
 
+/* Every place libwally can park a signature for one input: the ECDSA map, the
+ * taproot key-path field, and the taproot script-path leaf map. Counted before
+ * and after each signing call so `signed_ok` reflects signatures that actually
+ * landed, not calls that merely returned WALLY_OK. */
+static size_t input_signature_count(const struct wally_psbt *psbt, size_t i) {
+  size_t count = 0;
+  size_t n = 0;
+
+  if (wally_psbt_get_input_signatures_size(psbt, i, &n) == WALLY_OK)
+    count += n;
+  if (wally_psbt_get_input_taproot_signature_len(psbt, i, &n) == WALLY_OK && n)
+    count++;
+  count += psbt->inputs[i].taproot_leaf_signatures.num_items;
+
+  return count;
+}
+
+/* How one input classified, whether the policy refused it, and -- for a
+ * refused input -- the signature state to hand back exactly as it arrived.
+ *
+ * wally_psbt_sign() walks every input in the PSBT and signs any whose keypath
+ * map names the public key it was handed, so classifying an input per-loop
+ * does not by itself decide what gets signed. An input we refused -- including
+ * one classified EXTERNAL because its fingerprint is wrong -- still picks up a
+ * signature if it lists a key used elsewhere in the same transaction. Signing
+ * a whole PSBT cannot enforce a per-input gate, so snapshot before and restore
+ * after. */
+typedef struct {
+  input_ownership_t owner;
+  bool denied;    /* policy refused this input */
+  bool tracked;   /* a snapshot was taken (denied and it names some key) */
+  bool attempted; /* policy cleared it and a signing key was derived */
+  /* Signature count before the pass began. One wally_psbt_sign() call signs
+   * every input naming the key it was given, so an input can already be
+   * signed by the time its own turn comes round -- two inputs on one address
+   * are the common case. Only a baseline taken before any signing can tell
+   * "already signed by us" from "never signed". */
+  size_t sig_baseline;
+  size_t sig_count;
+  struct wally_map signatures;
+  struct wally_map leaf_signatures;
+  struct wally_map fields;
+} input_plan_t;
+
+/* Safe on an untouched plan, and safe twice, so every exit can run it over
+ * the whole array without tracking how far the classify loop got. */
+static void release_input_state(input_plan_t *plan) {
+  wally_map_clear(&plan->signatures);
+  wally_map_clear(&plan->leaf_signatures);
+  wally_map_clear(&plan->fields);
+  plan->tracked = false;
+}
+
+static bool capture_input_state(const struct wally_psbt *psbt, size_t i,
+                                input_plan_t *plan) {
+  const struct wally_psbt_input *inp = &psbt->inputs[i];
+
+  /* With no derivation info there is no public key for libwally to match on,
+   * so the input cannot pick up a signature and needs no snapshot. */
+  if (!inp->keypaths.num_items && !inp->taproot_leaf_paths.num_items)
+    return true;
+
+  if (wally_map_assign(&plan->signatures, &inp->signatures) != WALLY_OK ||
+      wally_map_assign(&plan->leaf_signatures, &inp->taproot_leaf_signatures) !=
+          WALLY_OK ||
+      wally_map_assign(&plan->fields, &inp->psbt_fields) != WALLY_OK) {
+    release_input_state(plan);
+    return false;
+  }
+
+  plan->sig_count = input_signature_count(psbt, i);
+  plan->tracked = true;
+  return true;
+}
+
+static void restore_input_state(struct wally_psbt *psbt, size_t i,
+                                input_plan_t *plan,
+                                psbt_sign_result_t *result) {
+  if (!plan->tracked)
+    return;
+
+  if (input_signature_count(psbt, i) != plan->sig_count) {
+    ESP_LOGW(TAG, "Discarding signature added to policy-denied input %zu", i);
+    if (result)
+      result->blocked++;
+  }
+
+  wally_map_assign(&psbt->inputs[i].signatures, &plan->signatures);
+  wally_map_assign(&psbt->inputs[i].taproot_leaf_signatures,
+                   &plan->leaf_signatures);
+  wally_map_assign(&psbt->inputs[i].psbt_fields, &plan->fields);
+  release_input_state(plan);
+}
+
+/* True when `policy` clears this input for signing. */
+static bool input_is_signable(const struct wally_psbt *psbt, size_t i,
+                              psbt_ownership_t ownership,
+                              psbt_sign_policy_t policy) {
+  if (ownership == PSBT_OWNERSHIP_EXTERNAL)
+    return false;
+
+  /* libwally honours whatever sighash byte the PSBT declares. Under anything
+   * but ALL/DEFAULT the signature outlives the transaction that was reviewed,
+   * so refuse here as well as in the UI gate. */
+  size_t sighash = 0;
+  if (wally_psbt_get_input_sighash(psbt, i, &sighash) != WALLY_OK)
+    sighash = 0;
+  if (!psbt_sighash_is_supported((uint32_t)sighash)) {
+    ESP_LOGW(TAG, "Skipping input %zu: unsupported sighash 0x%02x", i,
+             (unsigned)sighash);
+    return false;
+  }
+
+  if (ownership == PSBT_OWNERSHIP_OWNED_UNSAFE && !policy.allow_unsafe) {
+    ESP_LOGW(TAG, "Skipping input %zu: OWNED_UNSAFE without permissive policy",
+             i);
+    return false;
+  }
+  if (ownership == PSBT_OWNERSHIP_EXPECTED_OWNED &&
+      !policy.allow_expected_owned) {
+    ESP_LOGW(TAG,
+             "Skipping input %zu: EXPECTED_OWNED without expected-owned policy",
+             i);
+    return false;
+  }
+  return true;
+}
+
+/* BIP-370 signer rules: a signature that is not ANYONECANPAY pins the input
+ * set, and one that is not SIGHASH_NONE pins the output set, so both flags
+ * must be cleared once we have signed. `input_is_signable` refuses everything
+ * but ALL/DEFAULT, so reaching here means both apply unconditionally.
+ *
+ * libwally has this logic in wally_psbt_add_input_signature(), but its own
+ * signing path adds signatures at the input level and never runs it, so the
+ * flags survive a signing pass untouched. Leaving them set tells the next
+ * tool in the chain it may still add inputs or outputs, which would silently
+ * invalidate the signature we just produced. */
+static void apply_signer_modifiable_rules(struct wally_psbt *psbt) {
+  if (!psbt_is_v2(psbt))
+    return;
+
+  size_t flags = 0;
+  if (wally_psbt_get_tx_modifiable_flags(psbt, &flags) != WALLY_OK)
+    return;
+
+  uint32_t pinned = (uint32_t)flags & ~(uint32_t)(WALLY_PSBT_TXMOD_INPUTS |
+                                                  WALLY_PSBT_TXMOD_OUTPUTS);
+  if (pinned != (uint32_t)flags &&
+      wally_psbt_set_tx_modifiable_flags(psbt, pinned) != WALLY_OK)
+    ESP_LOGW(TAG, "Failed to clear tx-modifiable flags after signing");
+}
+
 size_t psbt_sign(struct wally_psbt *psbt, bool is_testnet,
-                 psbt_sign_policy_t policy) {
+                 psbt_sign_policy_t policy, psbt_sign_result_t *result) {
+  if (result)
+    memset(result, 0, sizeof(*result));
+
   if (!psbt) {
     ESP_LOGE(TAG, "Invalid PSBT");
     return 0;
   }
 
   size_t num_inputs = 0;
-  if (wally_psbt_get_num_inputs(psbt, &num_inputs) != WALLY_OK) {
+  if (wally_psbt_get_num_inputs(psbt, &num_inputs) != WALLY_OK || !num_inputs) {
     ESP_LOGE(TAG, "Failed to get number of inputs");
+    return 0;
+  }
+
+  input_plan_t *plan = calloc(num_inputs, sizeof(*plan));
+  if (!plan) {
+    ESP_LOGE(TAG, "Out of memory classifying %zu inputs", num_inputs);
     return 0;
   }
 
   size_t signatures_added = 0;
 
+  /* Classify everything up front, then freeze the inputs we will not sign.
+   * Bailing on a snapshot failure rather than signing unprotected. */
+  bool signable_any = false;
+  for (size_t i = 0; i < num_inputs; i++) {
+    plan[i].owner = psbt_classify_input(psbt, i, is_testnet);
+    if (input_is_signable(psbt, i, plan[i].owner.ownership, policy)) {
+      signable_any = true;
+      plan[i].sig_baseline = input_signature_count(psbt, i);
+      continue;
+    }
+    plan[i].denied = true;
+    if (!capture_input_state(psbt, i, &plan[i])) {
+      ESP_LOGE(TAG, "Failed to snapshot denied input %zu; refusing to sign", i);
+      goto cleanup;
+    }
+  }
+
+  if (!signable_any)
+    goto cleanup;
+
   /* Cache shared sighash midstates so per-input signing is O(n), not O(n^2). */
   wally_psbt_signing_cache_enable(psbt, 0);
 
   for (size_t i = 0; i < num_inputs; i++) {
-    input_ownership_t ownership = psbt_classify_input(psbt, i, is_testnet);
+    input_ownership_t ownership = plan[i].owner;
 
-    if (ownership.ownership == PSBT_OWNERSHIP_EXTERNAL)
+    if (plan[i].denied)
       continue;
-    if (ownership.ownership == PSBT_OWNERSHIP_OWNED_UNSAFE &&
-        !policy.allow_unsafe) {
-      ESP_LOGW(TAG,
-               "Skipping input %zu: OWNED_UNSAFE without permissive policy", i);
-      continue;
-    }
-    if (ownership.ownership == PSBT_OWNERSHIP_EXPECTED_OWNED &&
-        !policy.allow_expected_owned) {
-      ESP_LOGW(
-          TAG,
-          "Skipping input %zu: EXPECTED_OWNED without expected-owned policy",
-          i);
-      continue;
-    }
 
     const uint32_t *path = NULL;
     size_t path_len = 0;
@@ -711,6 +1111,8 @@ size_t psbt_sign(struct wally_psbt *psbt, bool is_testnet,
       continue;
     }
 
+    plan[i].attempted = true;
+
     int ret = wally_psbt_sign(psbt, derived_key->priv_key + 1,
                               EC_PRIVATE_KEY_LEN, EC_FLAG_GRIND_R);
     bip32_key_free(derived_key);
@@ -724,6 +1126,29 @@ size_t psbt_sign(struct wally_psbt *psbt, bool is_testnet,
 
   wally_psbt_signing_cache_disable(psbt);
 
+  for (size_t i = 0; i < num_inputs; i++)
+    restore_input_state(psbt, i, &plan[i], result);
+
+  /* Tally against the final PSBT rather than per call: what matters is
+   * whether an input we cleared ended the pass holding a new signature. */
+  if (result) {
+    for (size_t i = 0; i < num_inputs; i++) {
+      if (!plan[i].attempted)
+        continue;
+      result->attempted++;
+      if (input_signature_count(psbt, i) > plan[i].sig_baseline)
+        result->signed_ok++;
+    }
+  }
+
+  if (signatures_added)
+    apply_signer_modifiable_rules(psbt);
+
+cleanup:
+  for (size_t i = 0; i < num_inputs; i++)
+    release_input_state(&plan[i]);
+  free(plan);
+
   return signatures_added;
 }
 
@@ -732,9 +1157,18 @@ struct wally_psbt *psbt_trim(const struct wally_psbt *psbt) {
     return NULL;
   }
 
-  struct wally_tx *global_tx = NULL;
-  if (wally_psbt_get_global_tx_alloc(psbt, &global_tx) != WALLY_OK ||
-      !global_tx) {
+  /* The trimmed PSBT is rebuilt from a transaction, and that constructor only
+   * produces v0. Rebuilding a v2 one would mean either exporting it downgraded
+   * or upgrading it back -- and the upgrade path rewrites the tx-modifiable
+   * flags to fully-modifiable, undoing the signer rules applied above. Trim is
+   * only a payload-size optimisation, so decline it and let the caller export
+   * the PSBT as it arrived. */
+  if (psbt_is_v2(psbt)) {
+    return NULL;
+  }
+
+  struct wally_tx *global_tx = psbt_tx_alloc(psbt);
+  if (!global_tx) {
     return NULL;
   }
 
@@ -850,6 +1284,20 @@ struct wally_psbt *psbt_trim(const struct wally_psbt *psbt) {
       if (wally_psbt_get_input_taproot_signature(
               psbt, i, tap_sig, sizeof(tap_sig), &written) == WALLY_OK) {
         wally_psbt_set_input_taproot_signature(trimmed, i, tap_sig, written);
+      }
+    }
+
+    // Copy taproot script-path signatures (TAP_SCRIPT_SIG). These live in a
+    // separate map from the key-path signature above; without this, script-path
+    // (tapscript) spends would export with no signature.
+    const struct wally_map *tap_sigs = &psbt->inputs[i].taproot_leaf_signatures;
+    for (size_t j = 0; j < tap_sigs->num_items; j++) {
+      const struct wally_map_item *item = &tap_sigs->items[j];
+      if (item->key && item->key_len > 0 && item->value &&
+          item->value_len > 0) {
+        wally_psbt_input_add_taproot_leaf_signature(
+            &trimmed->inputs[i], item->key, item->key_len, item->value,
+            item->value_len);
       }
     }
   }

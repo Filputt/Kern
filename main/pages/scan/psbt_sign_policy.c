@@ -7,6 +7,7 @@
 #include <wally_core.h>
 #include <wally_psbt.h>
 #include <wally_psbt_members.h>
+#include <wally_transaction.h>
 
 #define EXTERNAL_INPUT_LIST_CAP 4
 
@@ -35,8 +36,9 @@ static void remember_flagged_path(sign_policy_review_t *review,
 
   review->flagged_index = index;
   review->flagged_is_input = is_input;
-  psbt_format_keypath(raw_keypath, raw_keypath_len, review->flagged_path,
-                      sizeof(review->flagged_path));
+  if (!psbt_format_keypath(raw_keypath, raw_keypath_len, review->flagged_path,
+                           sizeof(review->flagged_path)))
+    review->flagged_path[0] = '\0'; // the review renders without a path
 }
 
 static void scan_inputs(struct wally_psbt *psbt, bool is_testnet,
@@ -105,23 +107,54 @@ static void show_cannot_sign(const char *message,
                    DIALOG_STYLE_FULLSCREEN);
 }
 
+static char pending_reject_body[384];
+static dialog_callback_t pending_dismissed_cb;
+static void (*pending_load_cb)(void);
+
+static void offer_descriptor_cb(bool confirmed, void *user_data) {
+  (void)user_data;
+  if (confirmed && pending_load_cb) {
+    pending_load_cb();
+    return;
+  }
+  show_cannot_sign(pending_reject_body, pending_dismissed_cb);
+}
+
 static bool reject_expected_owned(const sign_policy_review_t *review,
-                                  dialog_callback_t dismissed_cb) {
+                                  dialog_callback_t dismissed_cb,
+                                  void (*load_descriptor_cb)(void)) {
   if (!review->need_expected_owned || settings_get_expected_owned_signing())
     return false;
 
-  char body[384];
-  snprintf(body, sizeof(body),
-           "%s %zu's path %s matches our fingerprint but the script "
+  snprintf(pending_reject_body, sizeof(pending_reject_body),
+           "%s %zu's path %s matches this wallet's fingerprint but the script "
            "cannot be re-derived from it -- wallet bug or attacker-crafted "
            "input.\n"
-           "If multisig: Load the wallet descriptor.\n"
-           "To sign anyway: Enable 'Expected-owned signing' in Wallet "
-           "settings. The device will then trust the PSBT's keypath without "
+           "To sign anyway: Enable 'Expected-owned signing' in Settings > "
+           "Wallet. The device will then trust the PSBT's keypath without "
            "verification.",
            review->flagged_is_input ? "Input" : "Output", review->flagged_index,
            review->flagged_path[0] ? review->flagged_path : "(unknown)");
-  show_cannot_sign(body, dismissed_cb);
+
+  if (!load_descriptor_cb) {
+    show_cannot_sign(pending_reject_body, dismissed_cb);
+    return true;
+  }
+
+  pending_dismissed_cb = dismissed_cb;
+  pending_load_cb = load_descriptor_cb;
+
+  char prompt[384];
+  snprintf(prompt, sizeof(prompt),
+           "%s %zu's path %s matches this wallet's fingerprint, but its "
+           "script can't be rebuilt from a single key.\n"
+           "Multisig and miniscript scripts can only be verified with the "
+           "wallet descriptor.\n\n"
+           "Load a descriptor now?",
+           review->flagged_is_input ? "Input" : "Output", review->flagged_index,
+           review->flagged_path[0] ? review->flagged_path : "(unknown)");
+  dialog_show_confirm(prompt, offer_descriptor_cb, NULL,
+                      DIALOG_STYLE_FULLSCREEN);
   return true;
 }
 
@@ -136,6 +169,94 @@ static bool reject_permissive(const sign_policy_review_t *review,
            "Enable 'Permissive signing' in Settings > Wallet to proceed.",
            review->flagged_is_input ? "Input" : "Output", review->flagged_index,
            review->flagged_path[0] ? review->flagged_path : "(unknown)");
+  show_cannot_sign(body, dismissed_cb);
+  return true;
+}
+
+/* Under NONE, SINGLE or ANYONECANPAY the signature keeps its validity while
+ * the parts of the transaction it does not cover are rewritten, so the outputs
+ * and fee the user is about to approve are not what gets mined. Nothing on the
+ * review screen can be presented honestly, hence a refusal rather than a
+ * warning. */
+static bool reject_unsupported_sighash(const psbt_sighash_audit_t *audit,
+                                       dialog_callback_t dismissed_cb) {
+  if (!audit->unsupported)
+    return false;
+
+  char body[384];
+  snprintf(body, sizeof(body),
+           "Input %zu asks to be signed with SIGHASH_%s.\n\n"
+           "Only ALL is supported: any other flag leaves part of the "
+           "transaction free to change after signing, so the amounts and fee "
+           "shown here would not be what gets broadcast.",
+           audit->first_unsupported, psbt_sighash_name(audit->first_sighash));
+  show_cannot_sign(body, dismissed_cb);
+  return true;
+}
+
+/* An input whose utxo data contradicts the prevout it spends is not a missing
+ * proof, it is a broken one: the previous transaction supplied does not hash
+ * to the outpoint, or it disagrees with the witness_utxo beside it. No fee can
+ * be computed from that, and libwally would refuse the signature anyway for a
+ * legacy input, so stop before the review screen shows a fabricated number. */
+static bool reject_invalid_amount(const psbt_amount_audit_t *audit,
+                                  dialog_callback_t dismissed_cb) {
+  if (!audit->invalid)
+    return false;
+
+  char body[384];
+  snprintf(body, sizeof(body),
+           "Input %zu's amount contradicts the transaction it spends: the "
+           "previous transaction supplied does not match the outpoint, or the "
+           "two copies of the amount disagree.\n\n"
+           "The fee cannot be computed and this PSBT should not be signed.",
+           audit->first_invalid);
+  show_cannot_sign(body, dismissed_cb);
+  return true;
+}
+
+/* Everything the review screen shows about outputs comes from the transaction
+ * the PSBT describes. v0 stores it directly; v2 has it rebuilt from per-input
+ * and per-output fields, which fails when those fields cannot form a valid
+ * transaction -- an amount past the supply, say. Refuse here rather than let
+ * the review screen come up empty and report it as unparseable data. */
+static bool reject_unbuildable_tx(struct wally_psbt *psbt,
+                                  dialog_callback_t dismissed_cb) {
+  struct wally_tx *tx = psbt_tx_alloc(psbt);
+  if (tx) {
+    wally_tx_free(tx);
+    return false;
+  }
+
+  show_cannot_sign("The transaction this PSBT describes cannot be "
+                   "reconstructed.\n\n"
+                   "An amount or output in it is out of range, so there is "
+                   "nothing here that can be reviewed.",
+                   dismissed_cb);
+  return true;
+}
+
+/* sum(outputs) > sum(inputs) cannot happen on chain: the difference is the
+ * fee and it is never negative. Either an input amount is understated or an
+ * output amount is inflated, and both make every number on the review screen
+ * a lie. Only decidable when each input actually supplied an amount -- a
+ * MISSING one contributes 0, which produces the same shape honestly. */
+static bool reject_impossible_fee(struct wally_psbt *psbt,
+                                  const psbt_amount_audit_t *audit,
+                                  dialog_callback_t dismissed_cb) {
+  uint64_t total_output = 0;
+  if (audit->missing || !psbt_total_output_value(psbt, &total_output) ||
+      total_output <= audit->total)
+    return false;
+
+  char body[384];
+  snprintf(body, sizeof(body),
+           "The outputs add up to more than the inputs, which cannot happen: "
+           "the difference between them is the fee and it is never "
+           "negative.\n\n"
+           "Inputs total %llu sats, outputs total %llu sats. An amount in this "
+           "PSBT is wrong, so nothing it claims can be reviewed honestly.",
+           (unsigned long long)audit->total, (unsigned long long)total_output);
   show_cannot_sign(body, dismissed_cb);
   return true;
 }
@@ -174,7 +295,8 @@ static bool reject_partial(const sign_policy_review_t *review,
 }
 
 bool psbt_sign_policy_allows_review(struct wally_psbt *psbt, bool is_testnet,
-                                    dialog_callback_t dismissed_cb) {
+                                    dialog_callback_t dismissed_cb,
+                                    void (*load_descriptor_cb)(void)) {
   if (!psbt)
     return false;
 
@@ -182,12 +304,26 @@ bool psbt_sign_policy_allows_review(struct wally_psbt *psbt, bool is_testnet,
   scan_inputs(psbt, is_testnet, &review);
   scan_outputs(psbt, is_testnet, &review);
 
+  psbt_amount_audit_t audit;
+  psbt_audit_input_amounts(psbt, &audit);
+
+  psbt_sighash_audit_t sighash_audit;
+  psbt_audit_sighash(psbt, &sighash_audit);
+
   if (!review.any_signable) {
     show_cannot_sign("No inputs match this wallet's signing policy.",
                      dismissed_cb);
     return false;
   }
-  if (reject_expected_owned(&review, dismissed_cb))
+  if (reject_unbuildable_tx(psbt, dismissed_cb))
+    return false;
+  if (reject_unsupported_sighash(&sighash_audit, dismissed_cb))
+    return false;
+  if (reject_invalid_amount(&audit, dismissed_cb))
+    return false;
+  if (reject_impossible_fee(psbt, &audit, dismissed_cb))
+    return false;
+  if (reject_expected_owned(&review, dismissed_cb, load_descriptor_cb))
     return false;
   if (reject_permissive(&review, dismissed_cb))
     return false;

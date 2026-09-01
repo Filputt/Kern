@@ -4,6 +4,7 @@
 #include <esp_log.h>
 #include <nvs.h>
 #include <nvs_flash.h>
+#include <string.h>
 
 static const char *TAG = "SETTINGS";
 static const char *NVS_NAMESPACE = "settings";
@@ -13,9 +14,15 @@ static const char *KEY_NETWORK = "def_net";
 static const char *KEY_BRIGHTNESS = "bright";
 static const char *KEY_AE_TARGET = "ae_tgt";
 static const char *KEY_FOCUS_POS = "focus";
+static const char *KEY_QR_DENSITY = "qr_dens";
+static const char *KEY_QR_SHADE = "qr_shade";
+static const char *KEY_QR_FPS = "qr_fps";
 static const char *KEY_PERMISSIVE_SIGNING = "perm_sign";
 static const char *KEY_PARTIAL_SIGNING = "part_sign";
 static const char *KEY_EXPECTED_OWNED_SIGNING = "exp_own_sign";
+static const char *KEY_SCREENSAVER = "scrn_svr";
+static const char *KEY_SESSION_TIMEOUT = "sess_tout";
+static const char *KEY_DISCLAIMER_VERSION = "disc_ver";
 
 static nvs_handle_t settings_nvs;
 static bool initialized = false;
@@ -46,24 +53,33 @@ static bool settings_get_bool_or_default(const char *key, bool default_value) {
   return settings_get_u8_or_default(key, default_value ? 1 : 0) != 0;
 }
 
+/* Callers of the settings_set_* family act on the new value immediately and
+ * have nothing to do about a failed write, so report it here once, naming the
+ * key, rather than leaving every call site to notice on its own. */
+static esp_err_t settings_report(const char *key, esp_err_t err) {
+  if (err != ESP_OK)
+    ESP_LOGE(TAG, "Failed to persist '%s': %s", key, esp_err_to_name(err));
+  return err;
+}
+
 static esp_err_t settings_set_u8_and_commit(const char *key, uint8_t value) {
   if (!initialized)
-    return ESP_ERR_INVALID_STATE;
+    return settings_report(key, ESP_ERR_INVALID_STATE);
 
   esp_err_t err = nvs_set_u8(settings_nvs, key, value);
   if (err != ESP_OK)
-    return err;
-  return nvs_commit(settings_nvs);
+    return settings_report(key, err);
+  return settings_report(key, nvs_commit(settings_nvs));
 }
 
 static esp_err_t settings_set_u16_and_commit(const char *key, uint16_t value) {
   if (!initialized)
-    return ESP_ERR_INVALID_STATE;
+    return settings_report(key, ESP_ERR_INVALID_STATE);
 
   esp_err_t err = nvs_set_u16(settings_nvs, key, value);
   if (err != ESP_OK)
-    return err;
-  return nvs_commit(settings_nvs);
+    return settings_report(key, err);
+  return settings_report(key, nvs_commit(settings_nvs));
 }
 
 static esp_err_t settings_set_bool_and_commit(const char *key, bool value) {
@@ -92,10 +108,17 @@ esp_err_t settings_init(void) {
   return ESP_OK;
 }
 
+void settings_deinit(void) {
+  if (!initialized)
+    return;
+  nvs_close(settings_nvs);
+  initialized = false;
+}
+
 wallet_network_t settings_get_network(void) {
-  uint8_t val = settings_get_u8_or_default(KEY_NETWORK, WALLET_NETWORK_MAINNET);
+  uint8_t val = settings_get_u8_or_default(KEY_NETWORK, WALLET_NETWORK_DEFAULT);
   return (val <= WALLET_NETWORK_TESTNET) ? (wallet_network_t)val
-                                         : WALLET_NETWORK_MAINNET;
+                                         : WALLET_NETWORK_DEFAULT;
 }
 
 esp_err_t settings_set_network(wallet_network_t network) {
@@ -104,10 +127,12 @@ esp_err_t settings_set_network(wallet_network_t network) {
 
 uint8_t settings_get_brightness(void) {
   uint8_t val = settings_get_u8_or_default(KEY_BRIGHTNESS, 50);
-  return (val <= 100) ? val : 50;
+  return (val >= BRIGHTNESS_MIN && val <= 100) ? val : 50;
 }
 
 esp_err_t settings_set_brightness(uint8_t brightness) {
+  if (brightness < BRIGHTNESS_MIN)
+    brightness = BRIGHTNESS_MIN;
   if (brightness > 100)
     brightness = 100;
   return settings_set_u8_and_commit(KEY_BRIGHTNESS, brightness);
@@ -139,6 +164,47 @@ esp_err_t settings_set_focus_position(uint16_t position) {
   return settings_set_u16_and_commit(KEY_FOCUS_POS, position);
 }
 
+uint16_t settings_get_qr_density(void) {
+  uint16_t val =
+      settings_get_u16_or_default(KEY_QR_DENSITY, QR_DENSITY_DEFAULT);
+  return (val >= QR_DENSITY_MIN && val <= QR_DENSITY_MAX) ? val
+                                                          : QR_DENSITY_DEFAULT;
+}
+
+esp_err_t settings_set_qr_density(uint16_t chars_per_frame) {
+  if (chars_per_frame < QR_DENSITY_MIN)
+    chars_per_frame = QR_DENSITY_MIN;
+  if (chars_per_frame > QR_DENSITY_MAX)
+    chars_per_frame = QR_DENSITY_MAX;
+  return settings_set_u16_and_commit(KEY_QR_DENSITY, chars_per_frame);
+}
+
+uint8_t settings_get_qr_shade(void) {
+  uint8_t val = settings_get_u8_or_default(KEY_QR_SHADE, QR_SHADE_DEFAULT);
+  return (val >= QR_SHADE_MIN && val <= QR_SHADE_MAX) ? val : QR_SHADE_DEFAULT;
+}
+
+esp_err_t settings_set_qr_shade(uint8_t shade) {
+  if (shade < QR_SHADE_MIN)
+    shade = QR_SHADE_MIN;
+  if (shade > QR_SHADE_MAX)
+    shade = QR_SHADE_MAX;
+  return settings_set_u8_and_commit(KEY_QR_SHADE, shade);
+}
+
+uint8_t settings_get_qr_fps(void) {
+  uint8_t val = settings_get_u8_or_default(KEY_QR_FPS, QR_FPS_DEFAULT);
+  return (val >= QR_FPS_MIN && val <= QR_FPS_MAX) ? val : QR_FPS_DEFAULT;
+}
+
+esp_err_t settings_set_qr_fps(uint8_t fps) {
+  if (fps < QR_FPS_MIN)
+    fps = QR_FPS_MIN;
+  if (fps > QR_FPS_MAX)
+    fps = QR_FPS_MAX;
+  return settings_set_u8_and_commit(KEY_QR_FPS, fps);
+}
+
 bool settings_get_permissive_signing(void) {
   return settings_get_bool_or_default(KEY_PERMISSIVE_SIGNING, false);
 }
@@ -161,6 +227,53 @@ bool settings_get_expected_owned_signing(void) {
 
 esp_err_t settings_set_expected_owned_signing(bool enabled) {
   return settings_set_bool_and_commit(KEY_EXPECTED_OWNED_SIGNING, enabled);
+}
+
+uint16_t settings_get_screensaver_timeout(void) {
+  return settings_get_u16_or_default(KEY_SCREENSAVER,
+                                     SCREENSAVER_TIMEOUT_DEFAULT_SEC);
+}
+
+esp_err_t settings_set_screensaver_timeout(uint16_t sec) {
+  return settings_set_u16_and_commit(KEY_SCREENSAVER, sec);
+}
+
+uint16_t settings_get_session_timeout(void) {
+  return settings_get_u16_or_default(KEY_SESSION_TIMEOUT,
+                                     SESSION_TIMEOUT_DEFAULT_SEC);
+}
+
+esp_err_t settings_set_session_timeout(uint16_t sec) {
+  return settings_set_u16_and_commit(KEY_SESSION_TIMEOUT, sec);
+}
+
+bool settings_disclaimer_acknowledged(const char *version) {
+  if (!initialized || !version)
+    return false;
+
+  char stored[SETTINGS_VERSION_MAX] = {0};
+  size_t len = sizeof(stored);
+  if (nvs_get_blob(settings_nvs, KEY_DISCLAIMER_VERSION, stored, &len) !=
+      ESP_OK)
+    return false;
+  stored[sizeof(stored) - 1] = '\0';
+  return strcmp(stored, version) == 0;
+}
+
+esp_err_t settings_acknowledge_disclaimer(const char *version) {
+  if (!initialized)
+    return ESP_ERR_INVALID_STATE;
+  if (!version)
+    return ESP_ERR_INVALID_ARG;
+
+  char stored[SETTINGS_VERSION_MAX] = {0};
+  strncpy(stored, version, sizeof(stored) - 1);
+
+  esp_err_t err = nvs_set_blob(settings_nvs, KEY_DISCLAIMER_VERSION, stored,
+                               sizeof(stored));
+  if (err != ESP_OK)
+    return settings_report(KEY_DISCLAIMER_VERSION, err);
+  return settings_report(KEY_DISCLAIMER_VERSION, nvs_commit(settings_nvs));
 }
 
 esp_err_t settings_reset_all(void) {

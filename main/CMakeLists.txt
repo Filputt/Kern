@@ -1,5 +1,6 @@
 file(GLOB_RECURSE SOURCES "*.c")
 list(FILTER SOURCES EXCLUDE REGEX ".*/core/test/.*")
+list(FILTER SOURCES EXCLUDE REGEX ".*/qr/test/.*")
 
 # Select touch driver based on board
 if(CONFIG_KERN_BOARD_WAVE_4B)
@@ -22,15 +23,25 @@ elseif(CONFIG_KERN_BOARD_CROWPANEL)
     set(TOUCH_DRIVER esp_lcd_touch_gt911)
     set(FONT_POLICY_WIDTH 1024)
     set(FONT_POLICY_HEIGHT 600)
+elseif(CONFIG_KERN_BOARD_WAVE_7B)
+    set(TOUCH_DRIVER esp_lcd_touch_gt911)
+    set(FONT_POLICY_WIDTH 1024)
+    set(FONT_POLICY_HEIGHT 600)
 endif()
 
 idf_component_register(
     SRCS ${SOURCES}
     INCLUDE_DIRS .
     PRIV_REQUIRES lvgl ${TOUCH_DRIVER} k_quirc esp_timer wave_4b wave_35 wave_5 wave_43
-                  crowpanel libwally-core cUR sd_card bbqr video spiffs nvs_flash efuse
-                  esp_hw_support esp_app_format mbedtls_compat esp_driver_ppa
+                  crowpanel wave_7b libwally-core cUR sd_card bbqr deflate_codec video spiffs
+                  nvs_flash efuse esp_hw_support esp_app_format mbedtls
+                  esp_driver_ppa app_update bootloader_support
 )
+
+# Ignoring a warn_unused_result return is a build error, not a warning. The
+# k_quirc and cUR entry points carry the attribute and report failure that way
+# and nothing else.
+target_compile_options(${COMPONENT_LIB} PRIVATE -Werror=unused-result)
 
 if(DEFINED FONT_POLICY_WIDTH AND DEFINED FONT_POLICY_HEIGHT)
     find_program(PYTHON3_EXECUTABLE python3 REQUIRED)
@@ -48,6 +59,3 @@ if(DEFINED FONT_POLICY_WIDTH AND DEFINED FONT_POLICY_HEIGHT)
         target_compile_definitions(${COMPONENT_LIB} PRIVATE ${ICON_FONT_DEFINITIONS})
     endif()
 endif()
-
-# Uncomment to enable Developer Tools menu (snapshot capture, decode testing)
-# target_compile_definitions(${COMPONENT_LIB} PRIVATE DEV_TOOLS_ENABLED)

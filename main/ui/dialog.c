@@ -4,63 +4,65 @@
 #include <stdlib.h>
 
 typedef struct {
-  dialog_callback_t callback;
-  void *user_data;
   lv_obj_t *root;
-} info_context_t;
-
-typedef struct {
-  dialog_confirm_callback_t callback;
+  lv_timer_t *timer;
   void *user_data;
-  lv_obj_t *root;
-} confirm_context_t;
+  union {
+    dialog_callback_t info;
+    dialog_confirm_callback_t confirm;
+    dialog_simple_callback_t error;
+  } callback;
+} dialog_context_t;
 
-typedef struct {
-  dialog_simple_callback_t callback;
-  lv_obj_t *modal;
-} error_context_t;
-
-static void info_ok_cb(lv_event_t *e) {
-  info_context_t *ctx = lv_event_get_user_data(e);
-  if (!ctx)
-    return;
-
-  if (ctx->callback)
-    ctx->callback(ctx->user_data);
-  if (ctx->root)
-    lv_obj_del(ctx->root);
+static void dialog_deleted_cb(lv_event_t *e) {
+  dialog_context_t *ctx = lv_event_get_user_data(e);
+  if (ctx->timer)
+    lv_timer_delete(ctx->timer);
   free(ctx);
 }
 
-static void confirm_finish(lv_event_t *e, bool confirmed) {
-  confirm_context_t *ctx = lv_event_get_user_data(e);
+static dialog_context_t *dialog_context_create(lv_obj_t *root) {
+  dialog_context_t *ctx = calloc(1, sizeof(*ctx));
   if (!ctx)
-    return;
+    return NULL;
 
-  if (ctx->callback)
-    ctx->callback(confirmed, ctx->user_data);
-  if (ctx->root)
-    lv_obj_del(ctx->root);
-  free(ctx);
+  ctx->root = root;
+  lv_obj_add_event_cb(root, dialog_deleted_cb, LV_EVENT_DELETE, ctx);
+  return ctx;
+}
+
+static void info_ok_cb(lv_event_t *e) {
+  dialog_context_t *ctx = lv_event_get_user_data(e);
+  dialog_callback_t callback = ctx->callback.info;
+  void *user_data = ctx->user_data;
+  lv_obj_delete(ctx->root);
+  if (callback)
+    callback(user_data);
+}
+
+static void confirm_finish(lv_event_t *e, bool confirmed) {
+  dialog_context_t *ctx = lv_event_get_user_data(e);
+  dialog_confirm_callback_t callback = ctx->callback.confirm;
+  void *user_data = ctx->user_data;
+  lv_obj_delete(ctx->root);
+  if (callback)
+    callback(confirmed, user_data);
 }
 
 static void confirm_yes_cb(lv_event_t *e) { confirm_finish(e, true); }
 static void confirm_no_cb(lv_event_t *e) { confirm_finish(e, false); }
 
 static void error_timer_cb(lv_timer_t *timer) {
-  error_context_t *ctx = lv_timer_get_user_data(timer);
-  if (!ctx)
-    return;
-
-  if (ctx->callback)
-    ctx->callback();
-  if (ctx->modal)
-    lv_obj_del(ctx->modal);
-  free(ctx);
+  dialog_context_t *ctx = lv_timer_get_user_data(timer);
+  dialog_simple_callback_t callback = ctx->callback.error;
+  ctx->timer = NULL; /* The one-shot timer is deleted after this callback. */
+  lv_obj_delete(ctx->root);
+  if (callback)
+    callback();
 }
 
 static void message_close_cb(lv_event_t *e) {
-  lv_obj_del(lv_event_get_user_data(e));
+  lv_obj_delete(lv_event_get_user_data(e));
 }
 
 static lv_obj_t *create_dialog_container(dialog_style_t style,
@@ -134,20 +136,22 @@ static void dialog_fit_overlay(lv_obj_t *dialog, dialog_style_t style,
   lv_obj_set_height(dialog, needed < max_h ? needed : max_h);
 }
 
-void dialog_show_info(const char *title, const char *message,
-                      dialog_callback_t callback, void *user_data,
-                      dialog_style_t style) {
+static void show_info_internal(const char *title, const char *message,
+                               const char *button_text, int32_t button_w_pct,
+                               dialog_callback_t callback, void *user_data,
+                               dialog_style_t style) {
   if (!message)
     return;
 
-  info_context_t *ctx = malloc(sizeof(info_context_t));
-  if (!ctx)
+  lv_obj_t *root;
+  lv_obj_t *dialog = create_dialog_container(style, &root);
+  dialog_context_t *ctx = dialog_context_create(root);
+  if (!ctx) {
+    lv_obj_delete(root);
     return;
-
-  ctx->callback = callback;
+  }
+  ctx->callback.info = callback;
   ctx->user_data = user_data;
-
-  lv_obj_t *dialog = create_dialog_container(style, &ctx->root);
 
   int32_t gap = theme_small_padding();
   int32_t btn_h = theme_button_height();
@@ -171,10 +175,24 @@ void dialog_show_info(const char *title, const char *message,
 
   lv_obj_align(make_message_label(body, message, 100), LV_ALIGN_TOP_MID, 0, 0);
 
-  lv_obj_t *ok_btn = theme_create_button(dialog, "OK", true);
-  lv_obj_set_size(ok_btn, LV_PCT(50), btn_h);
+  lv_obj_t *ok_btn = theme_create_button(dialog, button_text, true);
+  lv_obj_set_size(ok_btn, LV_PCT(button_w_pct), btn_h);
   lv_obj_align(ok_btn, LV_ALIGN_BOTTOM_MID, 0, 0);
   lv_obj_add_event_cb(ok_btn, info_ok_cb, LV_EVENT_CLICKED, ctx);
+}
+
+void dialog_show_info(const char *title, const char *message,
+                      dialog_callback_t callback, void *user_data,
+                      dialog_style_t style) {
+  show_info_internal(title, message, "OK", 50, callback, user_data, style);
+}
+
+void dialog_show_acknowledge(const char *title, const char *message,
+                             const char *button_text,
+                             dialog_callback_t callback, void *user_data,
+                             dialog_style_t style) {
+  show_info_internal(title, message, button_text ? button_text : "OK", 80,
+                     callback, user_data, style);
 }
 
 void dialog_show_error_timeout(const char *message,
@@ -186,23 +204,25 @@ void dialog_show_error_timeout(const char *message,
   if (timeout_ms <= 0)
     timeout_ms = 2000;
 
-  error_context_t *ctx = malloc(sizeof(error_context_t));
-  if (!ctx)
+  lv_obj_t *modal = lv_obj_create(lv_screen_active());
+  dialog_context_t *ctx = dialog_context_create(modal);
+  if (!ctx) {
+    lv_obj_delete(modal);
     return;
+  }
+  ctx->callback.error = callback;
 
-  ctx->callback = callback;
-  ctx->modal = lv_obj_create(lv_screen_active());
-  lv_obj_set_size(ctx->modal, LV_PCT(80), LV_PCT(80));
-  lv_obj_center(ctx->modal);
-  theme_apply_frame(ctx->modal);
+  lv_obj_set_size(modal, LV_PCT(80), LV_PCT(80));
+  lv_obj_center(modal);
+  theme_apply_frame(modal);
 
   int32_t gap = theme_small_padding();
 
-  lv_obj_t *title = theme_create_label(ctx->modal, "Error", false);
+  lv_obj_t *title = theme_create_label(modal, "Error", false);
   theme_apply_label(title, true);
   lv_obj_align(title, LV_ALIGN_TOP_MID, 0, gap);
 
-  lv_obj_t *error = theme_create_label(ctx->modal, message, false);
+  lv_obj_t *error = theme_create_label(modal, message, false);
   theme_apply_label(error, false);
   lv_obj_set_style_text_color(error, error_color(), 0);
   lv_obj_set_width(error, LV_PCT(90));
@@ -210,12 +230,15 @@ void dialog_show_error_timeout(const char *message,
   lv_obj_set_style_text_align(error, LV_TEXT_ALIGN_CENTER, 0);
   lv_obj_align(error, LV_ALIGN_CENTER, 0, 0);
 
-  lv_obj_t *hint = theme_create_label(ctx->modal, "Returning...", false);
+  lv_obj_t *hint = theme_create_label(modal, "Returning...", false);
   theme_apply_label(hint, false);
   lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -gap);
 
-  lv_timer_t *timer = lv_timer_create(error_timer_cb, timeout_ms, ctx);
-  lv_timer_set_repeat_count(timer, 1);
+  ctx->timer = lv_timer_create(error_timer_cb, timeout_ms, ctx);
+  if (ctx->timer)
+    lv_timer_set_repeat_count(ctx->timer, 1);
+  else
+    lv_obj_delete(modal);
 }
 
 static void add_confirm_button(lv_obj_t *dialog, const char *text,
@@ -238,14 +261,15 @@ static void show_confirm_internal(const char *message,
   if (!message)
     return;
 
-  confirm_context_t *ctx = malloc(sizeof(confirm_context_t));
-  if (!ctx)
+  lv_obj_t *root;
+  lv_obj_t *dialog = create_dialog_container(style, &root);
+  dialog_context_t *ctx = dialog_context_create(root);
+  if (!ctx) {
+    lv_obj_delete(root);
     return;
-
-  ctx->callback = callback;
+  }
+  ctx->callback.confirm = callback;
   ctx->user_data = user_data;
-
-  lv_obj_t *dialog = create_dialog_container(style, &ctx->root);
 
   if (danger && style == DIALOG_STYLE_OVERLAY)
     lv_obj_set_style_border_color(dialog, error_color(), 0);
@@ -308,22 +332,25 @@ lv_obj_t *dialog_show_progress(const char *title, const char *message,
 
 void dialog_show_message(const char *title, const char *message) {
   lv_obj_t *modal = lv_obj_create(lv_screen_active());
-  lv_obj_set_size(modal, 400, 220);
+  lv_obj_set_size(modal, LV_PCT(90), LV_SIZE_CONTENT);
   lv_obj_center(modal);
   theme_apply_frame(modal);
+  lv_obj_set_flex_flow(modal, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(modal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_all(modal, theme_default_padding(), 0);
+  lv_obj_set_style_pad_row(modal, theme_default_padding(), 0);
+  lv_obj_clear_flag(modal, LV_OBJ_FLAG_SCROLLABLE);
 
   lv_obj_t *title_label = theme_create_label(modal, title, false);
   lv_obj_set_style_text_font(title_label, theme_font_small(), 0);
-  lv_obj_align(title_label, LV_ALIGN_TOP_MID, 0, 0);
 
   lv_obj_t *msg_label = theme_create_label(modal, message, false);
-  lv_obj_set_width(msg_label, 340);
+  lv_obj_set_width(msg_label, LV_PCT(100));
   lv_label_set_long_mode(msg_label, LV_LABEL_LONG_WRAP);
   lv_obj_set_style_text_align(msg_label, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_align(msg_label, LV_ALIGN_CENTER, 0, -10);
 
   lv_obj_t *btn = theme_create_button(modal, "OK", true);
-  lv_obj_set_size(btn, 100, theme_min_touch_size());
-  lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, 0, 0);
+  lv_obj_set_size(btn, theme_button_width(), theme_button_height());
   lv_obj_add_event_cb(btn, message_close_cb, LV_EVENT_CLICKED, modal);
 }

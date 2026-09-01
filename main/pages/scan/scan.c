@@ -6,6 +6,7 @@
 #include "scan.h"
 #include "../../../components/cUR/src/types/bytes_type.h"
 #include "../../../components/cUR/src/types/psbt.h"
+#include "../../core/bip322.h"
 #include "../../core/kef.h"
 #include "../../core/key.h"
 #include "../../core/message_sign.h"
@@ -18,7 +19,7 @@
 #include "../../qr/parser.h"
 #include "../../qr/scanner.h"
 #include "../../qr/viewer.h"
-#include "../../ui/assets/icons_24.h"
+#include "../../ui/assets/icons.h"
 #include "../../ui/dialog.h"
 #include "../../ui/menu.h"
 #include "../../ui/sankey.h"
@@ -31,6 +32,7 @@
 #include "psbt_sign_policy.h"
 #include "sd_card.h"
 #include <esp_log.h>
+#include <inttypes.h>
 #include <lvgl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,6 +45,9 @@
 #include <wally_psbt_members.h>
 #include <wally_script.h>
 #include <wally_transaction.h>
+
+// Fee share of the inputs at which the review screen stops calling it normal.
+#define HIGH_FEE_PERCENT 10u
 
 typedef enum {
   OUTPUT_TYPE_SELF_TRANSFER,
@@ -61,6 +66,7 @@ typedef struct {
   uint64_t value;
   char *address;
   uint32_t address_index;
+  bool is_dust;  /* below the relay dust threshold for its script type */
   char path[80]; /* populated for OWNED_UNSAFE / EXPECTED_OWNED */
 } classified_output_t;
 
@@ -79,6 +85,7 @@ typedef struct {
    * that aren't OWNED_SAFE — UNSAFE / EXPECTED_OWNED inputs surface the
    * raw path in their own warning sections. */
   char policy[64];
+  char path[80]; /* populated for OWNED_UNSAFE / EXPECTED_OWNED */
 } classified_input_t;
 
 static const char *ss_script_label(ss_script_type_t script) {
@@ -143,6 +150,8 @@ static ui_menu_t *export_menu = NULL;
 // Message signing data
 static parsed_sign_message_t current_message = {0};
 static bool is_message_sign = false;
+static bip322_request_t current_bip322 = {0};
+static bool is_bip322 = false;
 
 // Mnemonic data
 static char *scanned_mnemonic = NULL;
@@ -163,12 +172,23 @@ static void mismatch_dialog_cb(void *user_data);
 static void return_from_descriptor_scanner_cb(void);
 static void create_message_sign_display(void);
 static void message_sign_button_cb(lv_event_t *e);
+static void create_bip322_sign_display(void);
 static void handle_descriptor_content(const char *descriptor_str);
 static void handle_address_content(const char *content);
 static void handle_mnemonic_content(const char *data, size_t len);
 static void scan_kef_return_cb(void);
 static void scan_kef_success_cb(const uint8_t *data, size_t len);
-static void descriptor_loaded_info_cb(void *user_data);
+static void policy_reject_dismissed_cb(void *user_data);
+static void resume_psbt_review(bool offer_descriptor);
+static void psbt_offer_descriptor_cb(void);
+static void psbt_desc_qr_cb(void);
+static void psbt_desc_flash_cb(void);
+static void psbt_desc_sd_cb(void);
+static void psbt_desc_menu_back_cb(void);
+static void psbt_descriptor_validation_cb(descriptor_validation_result_t result,
+                                          void *user_data);
+static void psbt_desc_storage_return_cb(void);
+static void psbt_desc_storage_success_cb(void);
 static void show_export_choice(void);
 static void export_show_qr_cb(void);
 static void export_save_sd_cb(void);
@@ -294,6 +314,15 @@ static lv_obj_t *create_btc_value_row(lv_obj_t *parent, const char *prefix,
   return row;
 }
 
+static void create_review_note(lv_obj_t *parent, const char *text,
+                               lv_color_t color) {
+  lv_obj_t *label = theme_create_label(parent, text, false);
+  lv_obj_set_style_text_color(label, color, 0);
+  lv_obj_set_style_text_font(label, theme_font_small(), 0);
+  lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(label, LV_PCT(100));
+}
+
 // Classify output as self-transfer, change, owned-unsafe, expected-owned,
 // or spend. For owned-unsafe and expected-owned, the path string is written
 // to path_out (truncated to path_out_size).
@@ -320,11 +349,10 @@ static output_type_t classify_output(size_t output_index,
 
   case PSBT_OWNERSHIP_OWNED_UNSAFE:
   case PSBT_OWNERSHIP_EXPECTED_OWNED:
-    if (path_out && path_out_size > 0) {
-      path_out[0] = '\0';
-      psbt_format_keypath(ownership.raw_keypath, ownership.raw_keypath_len,
-                          path_out, path_out_size);
-    }
+    if (path_out && path_out_size > 0 &&
+        !psbt_format_keypath(ownership.raw_keypath, ownership.raw_keypath_len,
+                             path_out, path_out_size))
+      path_out[0] = '\0'; // renders no path line
     return ownership.ownership == PSBT_OWNERSHIP_OWNED_UNSAFE
                ? OUTPUT_TYPE_OWNED_UNSAFE
                : OUTPUT_TYPE_EXPECTED_OWNED;
@@ -393,6 +421,15 @@ static address_network_t detect_address_network(const char *data) {
 
   free(stripped);
   return result;
+}
+
+static lv_obj_t *progress_dialog = NULL;
+
+static void dismiss_progress(void) {
+  if (progress_dialog) {
+    lv_obj_del(progress_dialog);
+    progress_dialog = NULL;
+  }
 }
 
 // Classify an already-assembled blob and route it to the matching review
@@ -488,14 +525,18 @@ static void finish_dispatch(char *qr_content, size_t qr_content_len,
         return;
       }
 
-      if (!psbt_sign_policy_allows_review(current_psbt, is_testnet,
-                                          descriptor_loaded_info_cb)) {
+      if (bip322_detect(current_psbt)) {
+        if (!bip322_parse(current_psbt, is_testnet, &current_bip322)) {
+          dialog_show_error_timeout("Invalid BIP322 message request",
+                                    return_callback, 0);
+          return;
+        }
+        is_bip322 = true;
+        create_bip322_sign_display();
         return;
       }
 
-      if (!create_psbt_info_display()) {
-        dialog_show_error_timeout("Invalid PSBT data", return_callback, 0);
-      }
+      resume_psbt_review(true);
     }
   } else {
     dialog_show_error_timeout("Unrecognized format", return_callback, 0);
@@ -504,15 +545,9 @@ static void finish_dispatch(char *qr_content, size_t qr_content_len,
 
 // --- Main scanner callback with two-layer detection ---
 
-static void return_from_qr_scanner_cb(void) {
-  if (!qr_scanner_has_completed_result()) {
-    qr_scanner_page_hide();
-    qr_scanner_page_destroy();
-    if (return_callback)
-      return_callback();
-    return;
-  }
-
+// Camera teardown plus payload parsing — for large PSBTs this can take over a
+// second, so it runs behind the progress dialog from a one-shot timer.
+static void process_scan_result(void) {
   int detected_format = qr_scanner_get_format();
 
   char *qr_content = NULL;
@@ -534,8 +569,8 @@ static void return_from_qr_scanner_cb(void) {
           const uint8_t *psbt_bytes = psbt_get_data(psbt_data, &psbt_len);
           if (psbt_bytes) {
             cleanup_psbt_data();
-            parse_success = (wally_psbt_from_bytes(psbt_bytes, psbt_len, 0,
-                                                   &current_psbt) == WALLY_OK);
+            parse_success =
+                psbt_parse_payload(psbt_bytes, psbt_len, &current_psbt);
           }
           psbt_free(psbt_data);
         }
@@ -575,15 +610,23 @@ static void return_from_qr_scanner_cb(void) {
      * shot at it. The decoded payload from qr_parser_result is
      * NUL-terminated (parser.c:301), so it's safe to treat as a C
      * string in the layer-2 detectors. */
+    char bbqr_file_type = qr_scanner_get_bbqr_file_type();
     qr_content = qr_scanner_get_completed_content_with_len(&qr_content_len);
     if (qr_content && qr_content_len > 0) {
       cleanup_psbt_data();
-      parse_success =
-          (wally_psbt_from_bytes((const uint8_t *)qr_content, qr_content_len, 0,
-                                 &current_psbt) == WALLY_OK);
+      parse_success = psbt_parse_payload((const uint8_t *)qr_content,
+                                         qr_content_len, &current_psbt);
       if (parse_success) {
         free(qr_content);
         qr_content = NULL;
+      } else if (bbqr_file_type == 'P') {
+        /* Header explicitly says PSBT — don't let the text detectors (or
+         * the KEF prompt) misclassify raw PSBT bytes. */
+        free(qr_content);
+        qr_scanner_page_hide();
+        qr_scanner_page_destroy();
+        dialog_show_error_timeout("Invalid PSBT data", return_callback, 0);
+        return;
       }
     }
   } else {
@@ -595,6 +638,29 @@ static void return_from_qr_scanner_cb(void) {
   qr_scanner_page_destroy();
 
   finish_dispatch(qr_content, qr_content_len, parse_success, detected_format);
+}
+
+static void deferred_scan_process_cb(lv_timer_t *timer) {
+  (void)timer;
+  process_scan_result();
+  dismiss_progress();
+}
+
+static void return_from_qr_scanner_cb(void) {
+  if (!qr_scanner_has_completed_result()) {
+    qr_scanner_page_hide();
+    qr_scanner_page_destroy();
+    if (return_callback)
+      return_callback();
+    return;
+  }
+
+  // Parsing large PSBTs can take over a second — show a progress dialog and
+  // defer the work to a one-shot timer so LVGL gets to render it first.
+  progress_dialog =
+      dialog_show_progress("Scan", "Processing...", DIALOG_STYLE_OVERLAY);
+  lv_timer_t *t = lv_timer_create(deferred_scan_process_cb, 50, NULL);
+  lv_timer_set_repeat_count(t, 1);
 }
 
 // Resets the signed-PSBT export context. A scanned PSBT has no source folder
@@ -717,8 +783,7 @@ void scan_load_content(lv_obj_t *parent, const uint8_t *data, size_t len,
   // A file may hold a serialized binary PSBT — try that first (mirroring the
   // BBQr path); otherwise normalize the text for the layer-2 detectors.
   cleanup_psbt_data();
-  bool parse_success =
-      (wally_psbt_from_bytes(data, len, 0, &current_psbt) == WALLY_OK);
+  bool parse_success = psbt_parse_payload(data, len, &current_psbt);
 
   char *content = NULL;
   if (!parse_success) {
@@ -736,7 +801,7 @@ void scan_load_content(lv_obj_t *parent, const uint8_t *data, size_t len,
 
 // --- Descriptor handler ---
 
-static void descriptor_loaded_info_cb(void *user_data) {
+static void policy_reject_dismissed_cb(void *user_data) {
   (void)user_data;
   if (return_callback)
     return_callback();
@@ -771,6 +836,81 @@ static void scan_descriptor_validation_cb(descriptor_validation_result_t result,
 static void handle_descriptor_content(const char *descriptor_str) {
   descriptor_loader_process_string(descriptor_str,
                                    scan_descriptor_validation_cb, NULL);
+}
+
+// --- On-the-fly descriptor load for the sign-policy gate ---
+
+// Re-runs the policy gate against the retained PSBT. With offer_descriptor the
+// expected-owned rejection becomes an offer to load a descriptor; without it
+// the gate falls back to the plain rejection dialog.
+static void resume_psbt_review(bool offer_descriptor) {
+  if (!psbt_sign_policy_allows_review(
+          current_psbt, is_testnet, policy_reject_dismissed_cb,
+          offer_descriptor ? psbt_offer_descriptor_cb : NULL))
+    return;
+  if (!create_psbt_info_display())
+    dialog_show_error_timeout("Invalid PSBT data", return_callback, 0);
+}
+
+static void psbt_offer_descriptor_cb(void) {
+  descriptor_loader_show_source_menu(scan_screen, psbt_desc_qr_cb,
+                                     psbt_desc_flash_cb, psbt_desc_sd_cb,
+                                     psbt_desc_menu_back_cb);
+}
+
+static void psbt_desc_menu_back_cb(void) {
+  descriptor_loader_destroy_source_menu();
+  resume_psbt_review(false);
+}
+
+static void psbt_descriptor_validation_cb(descriptor_validation_result_t result,
+                                          void *user_data) {
+  (void)user_data;
+  if (result != VALIDATION_SUCCESS)
+    descriptor_loader_show_error(result);
+  resume_psbt_review(true);
+}
+
+static void return_from_descriptor_scanner_cb(void) {
+  if (!qr_scanner_has_completed_result()) {
+    qr_scanner_page_hide();
+    qr_scanner_page_destroy();
+    resume_psbt_review(false);
+    return;
+  }
+  descriptor_loader_process_scanner(psbt_descriptor_validation_cb, NULL, NULL);
+}
+
+static void psbt_desc_qr_cb(void) {
+  descriptor_loader_destroy_source_menu();
+  qr_scanner_page_create(NULL, return_from_descriptor_scanner_cb);
+  qr_scanner_page_show();
+}
+
+static void psbt_desc_storage_return_cb(void) {
+  load_descriptor_storage_page_destroy();
+  resume_psbt_review(false);
+}
+
+static void psbt_desc_storage_success_cb(void) {
+  load_descriptor_storage_page_destroy();
+  resume_psbt_review(true);
+}
+
+static void psbt_desc_flash_cb(void) {
+  descriptor_loader_destroy_source_menu();
+  load_descriptor_storage_page_create(
+      lv_screen_active(), psbt_desc_storage_return_cb,
+      psbt_desc_storage_success_cb, STORAGE_FLASH);
+  load_descriptor_storage_page_show();
+}
+
+static void psbt_desc_sd_cb(void) {
+  descriptor_loader_destroy_source_menu();
+  load_descriptor_storage_page_create(lv_screen_active(),
+                                      psbt_desc_storage_return_cb,
+                                      psbt_desc_storage_success_cb, STORAGE_SD);
+  load_descriptor_storage_page_show();
 }
 
 // --- Address handler ---
@@ -839,8 +979,9 @@ static void handle_mnemonic_content(const char *data, size_t len) {
   }
 
   // Get current fingerprint
-  char current_fp[9] = "????????";
-  key_get_fingerprint_hex(current_fp);
+  char current_fp[9];
+  if (!key_get_fingerprint_hex(current_fp))
+    strcpy(current_fp, "????????");
 
   // Compute new mnemonic's fingerprint without touching the loaded key
   wallet_network_t net = wallet_get_network();
@@ -992,6 +1133,9 @@ static bool create_psbt_info_display(void) {
     free(input_amounts);
     return false;
   }
+  psbt_amount_audit_t amount_audit;
+  psbt_audit_input_amounts(current_psbt, &amount_audit);
+
   uint64_t total_input_value = 0;
   size_t external_input_count = 0;
   for (size_t i = 0; i < num_inputs; i++) {
@@ -1007,6 +1151,13 @@ static bool create_psbt_info_display(void) {
                           : primary_color();
     format_input_policy(&own, classified_inputs[i].policy,
                         sizeof(classified_inputs[i].policy));
+    classified_inputs[i].path[0] = '\0';
+    if ((own.ownership == PSBT_OWNERSHIP_OWNED_UNSAFE ||
+         own.ownership == PSBT_OWNERSHIP_EXPECTED_OWNED) &&
+        !psbt_format_keypath(own.raw_keypath, own.raw_keypath_len,
+                             classified_inputs[i].path,
+                             sizeof(classified_inputs[i].path)))
+      classified_inputs[i].path[0] = '\0'; // renders no path line
 
     /* External inputs need their address rendered in the warning section.
      * Skip address decoding for owned inputs — they're not displayed. */
@@ -1021,9 +1172,8 @@ static bool create_psbt_info_display(void) {
     }
   }
 
-  struct wally_tx *global_tx = NULL;
-  int tx_ret = wally_psbt_get_global_tx_alloc(current_psbt, &global_tx);
-  if (tx_ret != WALLY_OK || !global_tx) {
+  struct wally_tx *global_tx = psbt_tx_alloc(current_psbt);
+  if (!global_tx) {
     for (size_t i = 0; i < num_inputs; i++)
       free(classified_inputs[i].address);
     free(classified_inputs);
@@ -1047,6 +1197,16 @@ static bool create_psbt_info_display(void) {
   uint64_t total_output_value = 0;
   for (size_t i = 0; i < num_outputs; i++) {
     total_output_value += global_tx->outputs[i].satoshi;
+  }
+
+  /* Both are read off the global tx, which is freed before the notes are
+   * rendered. BIP-125 opts a transaction into replaceability when any input's
+   * sequence is below 0xfffffffe. */
+  uint32_t locktime = global_tx->locktime;
+  bool signals_rbf = false;
+  for (size_t i = 0; i < global_tx->num_inputs; i++) {
+    if (global_tx->inputs[i].sequence < 0xfffffffeu)
+      signals_rbf = true;
   }
   uint64_t fee = (total_input_value > total_output_value)
                      ? (total_input_value - total_output_value)
@@ -1078,6 +1238,10 @@ static bool create_psbt_info_display(void) {
     classified_outputs[i].type = classify_output(
         i, &classified_outputs[i].address_index, classified_outputs[i].path,
         sizeof(classified_outputs[i].path));
+    classified_outputs[i].is_dust =
+        classified_outputs[i].value <
+        psbt_output_dust_threshold(global_tx->outputs[i].script,
+                                   global_tx->outputs[i].script_len);
   }
 
   size_t diagram_idx = 0;
@@ -1226,6 +1390,80 @@ static bool create_psbt_info_display(void) {
     lv_obj_set_style_max_width(src, LV_PCT(100), 0);
   }
   (void)total_input_value; /* now distributed across per-policy rows */
+
+  /* Count non-standard owned inputs up-front so we can collapse to a
+   * totals row when the list would scroll-fatigue the review screen. */
+#define NONSTANDARD_INPUT_INLINE_THRESHOLD 4
+  size_t unsafe_input_count = 0;
+  uint64_t total_unsafe_input = 0;
+  for (size_t i = 0; i < num_inputs; i++) {
+    if (classified_inputs[i].ownership == PSBT_OWNERSHIP_OWNED_UNSAFE) {
+      unsafe_input_count++;
+      total_unsafe_input += classified_inputs[i].value;
+    }
+  }
+
+  if (unsafe_input_count > NONSTANDARD_INPUT_INLINE_THRESHOLD) {
+    char title_text[64];
+    snprintf(title_text, sizeof(title_text),
+             "Owned inputs, non-standard path (%zu): ", unsafe_input_count);
+    lv_obj_t *title =
+        theme_create_label(psbt_info_container, title_text, false);
+    theme_apply_label(title, true);
+    lv_obj_set_style_text_color(title, accent_color(), 0);
+    lv_obj_set_style_margin_top(title, 15, 0);
+    lv_obj_set_width(title, LV_PCT(100));
+
+    lv_obj_t *row = create_btc_value_row(
+        psbt_info_container, "Total: ", total_unsafe_input, primary_color());
+    lv_obj_set_width(row, LV_PCT(100));
+    lv_obj_set_style_pad_left(row, 20, 0);
+  } else if (unsafe_input_count > 0) {
+    lv_obj_t *title = theme_create_label(
+        psbt_info_container, "Owned inputs (non-standard path): ", false);
+    theme_apply_label(title, true);
+    lv_obj_set_style_text_color(title, accent_color(), 0);
+    lv_obj_set_style_margin_top(title, 15, 0);
+    lv_obj_set_width(title, LV_PCT(100));
+
+    for (size_t i = 0; i < num_inputs; i++) {
+      if (classified_inputs[i].ownership != PSBT_OWNERSHIP_OWNED_UNSAFE)
+        continue;
+      char text[128];
+      snprintf(text, sizeof(text),
+               "Input %zu (%s): ", classified_inputs[i].index,
+               classified_inputs[i].path[0] ? classified_inputs[i].path : "?");
+      lv_obj_t *row =
+          create_btc_value_row(psbt_info_container, text,
+                               classified_inputs[i].value, primary_color());
+      lv_obj_set_width(row, LV_PCT(100));
+      lv_obj_set_style_pad_left(row, 20, 0);
+    }
+  }
+
+  bool has_expected_inputs = false;
+  for (size_t i = 0; i < num_inputs; i++) {
+    if (classified_inputs[i].ownership != PSBT_OWNERSHIP_EXPECTED_OWNED)
+      continue;
+    if (!has_expected_inputs) {
+      lv_obj_t *title =
+          theme_create_label(psbt_info_container,
+                             "Expected ownership inputs (UNVERIFIED): ", false);
+      theme_apply_label(title, true);
+      lv_obj_set_style_text_color(title, error_color(), 0);
+      lv_obj_set_style_margin_top(title, 15, 0);
+      lv_obj_set_width(title, LV_PCT(100));
+      has_expected_inputs = true;
+    }
+
+    char text[128];
+    snprintf(text, sizeof(text), "Input %zu (%s): ", classified_inputs[i].index,
+             classified_inputs[i].path[0] ? classified_inputs[i].path : "?");
+    lv_obj_t *row = create_btc_value_row(
+        psbt_info_container, text, classified_inputs[i].value, primary_color());
+    lv_obj_set_width(row, LV_PCT(100));
+    lv_obj_set_style_pad_left(row, 20, 0);
+  }
 
   /* External inputs warning section. The Partial-signing gate has already
    * passed (otherwise we wouldn't reach the review screen with externals
@@ -1426,6 +1664,19 @@ static bool create_psbt_info_display(void) {
     }
   }
 
+  size_t dust_count = 0;
+  size_t first_dust = 0;
+  uint64_t first_dust_value = 0;
+  for (size_t i = 0; i < num_outputs; i++) {
+    if (!classified_outputs[i].is_dust)
+      continue;
+    if (!dust_count) {
+      first_dust = classified_outputs[i].index;
+      first_dust_value = classified_outputs[i].value;
+    }
+    dust_count++;
+  }
+
   for (size_t i = 0; i < num_outputs; i++) {
     if (classified_outputs[i].address) {
       if (strcmp(classified_outputs[i].address, "OP_RETURN") == 0) {
@@ -1452,12 +1703,103 @@ static bool create_psbt_info_display(void) {
     global_tx = NULL;
   }
 
+  uint32_t fee_percent = psbt_fee_percent(fee, total_input_value);
+
   if (fee > 0) {
     theme_create_separator(psbt_info_container, primary_color());
 
     lv_obj_t *fee_row =
         create_btc_value_row(psbt_info_container, "Fee: ", fee, error_color());
     lv_obj_set_width(fee_row, LV_PCT(100));
+    lv_obj_set_flex_flow(fee_row, LV_FLEX_FLOW_ROW_WRAP);
+
+    lv_obj_t *pct = lv_label_create(fee_row);
+    lv_label_set_text_fmt(pct, "(%" PRIu32 "%% of inputs)", fee_percent);
+    lv_obj_set_style_text_font(pct, theme_font_small(), 0);
+    lv_obj_set_style_text_color(
+        pct,
+        fee_percent >= HIGH_FEE_PERCENT ? error_color() : secondary_color(), 0);
+
+    /* A fee this large relative to what is being spent is nearly always a
+     * mistake or an attack, and it is the one number a compromised coordinator
+     * most wants slipped past the review. */
+    if (fee_percent >= HIGH_FEE_PERCENT) {
+      char note[128];
+      snprintf(note, sizeof(note),
+               LV_SYMBOL_WARNING " High fee: %" PRIu32
+                                 "%% of the inputs is going to miners.",
+               fee_percent);
+      create_review_note(psbt_info_container, note, error_color());
+    }
+  }
+
+  /* The fee is inputs minus outputs, and the outputs are committed to by the
+   * sighash. The inputs are only as good as their proof, so say so here rather
+   * than let the number read as verified. */
+  if (!psbt_amounts_are_proven(&amount_audit)) {
+    char note[160];
+    snprintf(note, sizeof(note),
+             LV_SYMBOL_WARNING " Unproven fee: %zu of %zu input amounts are "
+                               "not backed by their previous transaction.",
+             amount_audit.num_inputs - amount_audit.proven,
+             amount_audit.num_inputs);
+    create_review_note(psbt_info_container, note, highlight_color());
+  }
+
+  /* The gate refuses a PSBT whose outputs exceed the inputs, so reaching here
+   * that way means an input never supplied an amount and was counted as zero.
+   * The unproven-fee note above already says the numbers are not backed; name
+   * the missing fee too, because no fee row at all otherwise reads as "no
+   * fee". */
+  if (total_output_value > total_input_value) {
+    create_review_note(psbt_info_container,
+                       LV_SYMBOL_WARNING
+                       " Fee unknown: the outputs exceed the input amounts "
+                       "this PSBT supplied.",
+                       error_color());
+  }
+
+  /* Below the relay dust threshold an output costs more to spend than it
+   * holds, so the transaction is unlikely to propagate at all. */
+  if (dust_count) {
+    char note[192];
+    if (dust_count == 1)
+      snprintf(note, sizeof(note),
+               LV_SYMBOL_WARNING " Dust: output %zu holds only %llu sats, "
+                                 "below the amount needed to relay.",
+               first_dust, (unsigned long long)first_dust_value);
+    else
+      snprintf(note, sizeof(note),
+               LV_SYMBOL_WARNING " Dust: %zu outputs are below the amount "
+                                 "needed to relay.",
+               dust_count);
+    create_review_note(psbt_info_container, note, highlight_color());
+  }
+
+  /* Neither is visible anywhere else on this screen, and both change what
+   * signing actually commits to: a future locktime is not broadcastable yet,
+   * and an RBF-signalling transaction can be replaced before it confirms. */
+  if (locktime) {
+    char note[160];
+    if (locktime < 500000000u)
+      snprintf(note, sizeof(note),
+               LV_SYMBOL_WARNING " Locked until block %" PRIu32
+                                 ": not broadcastable before then.",
+               locktime);
+    else
+      snprintf(note, sizeof(note),
+               LV_SYMBOL_WARNING " Locked until unix time %" PRIu32
+                                 ": not broadcastable before then.",
+               locktime);
+    create_review_note(psbt_info_container, note, highlight_color());
+  }
+
+  if (signals_rbf) {
+    create_review_note(psbt_info_container,
+                       LV_SYMBOL_WARNING
+                       " Replaceable (RBF): this transaction can be replaced "
+                       "by a different one before it confirms.",
+                       secondary_color());
   }
 
   create_sign_action_row(psbt_info_container, sign_button_cb);
@@ -1465,20 +1807,16 @@ static bool create_psbt_info_display(void) {
   return true;
 }
 
-static lv_obj_t *progress_dialog = NULL;
-
-static void dismiss_progress(void) {
-  if (progress_dialog) {
-    lv_obj_del(progress_dialog);
-    progress_dialog = NULL;
-  }
-}
-
 static void destroy_export_menu(void) {
   if (export_menu) {
     ui_menu_destroy(export_menu);
     export_menu = NULL;
   }
+}
+
+static void partial_sign_ack_cb(void *user_data) {
+  (void)user_data;
+  show_export_choice();
 }
 
 static void deferred_sign_cb(lv_timer_t *timer) {
@@ -1494,7 +1832,9 @@ static void deferred_sign_cb(lv_timer_t *timer) {
       .allow_unsafe = settings_get_permissive_signing(),
       .allow_expected_owned = settings_get_expected_owned_signing(),
   };
-  size_t signatures_added = psbt_sign(current_psbt, is_testnet, sign_policy);
+  psbt_sign_result_t sign_result;
+  size_t signatures_added =
+      psbt_sign(current_psbt, is_testnet, sign_policy, &sign_result);
 
   if (signatures_added == 0) {
     dismiss_progress();
@@ -1507,7 +1847,9 @@ static void deferred_sign_cb(lv_timer_t *timer) {
     signed_psbt_base64 = NULL;
   }
 
-  struct wally_psbt *trimmed_psbt = psbt_trim(current_psbt);
+  // Trimming rebuilds the PSBT from its tx and drops global unknowns, which
+  // would strip the BIP322 message field — export those untrimmed (tiny).
+  struct wally_psbt *trimmed_psbt = is_bip322 ? NULL : psbt_trim(current_psbt);
   struct wally_psbt *export_psbt = trimmed_psbt ? trimmed_psbt : current_psbt;
 
   int ret = wally_psbt_to_base64(export_psbt, 0, &signed_psbt_base64);
@@ -1525,6 +1867,42 @@ static void deferred_sign_cb(lv_timer_t *timer) {
 
   saved_return_callback =
       complete_callback ? complete_callback : return_callback;
+
+  // A PSBT built so that refused inputs pick up a signature from a key used
+  // elsewhere in the same transaction is not an accident. The signatures were
+  // stripped; say so, because the next PSBT from that source is suspect too.
+  if (sign_result.blocked) {
+    char body[320];
+    snprintf(body, sizeof(body),
+             "%zu input%s that this wallet refused to sign attempted to "
+             "collect a signature from a key used by another input.\n\n"
+             "Those signatures were discarded. A PSBT arranged this way does "
+             "not come from an honest coordinator -- treat its source as "
+             "compromised.",
+             sign_result.blocked, sign_result.blocked == 1 ? "" : "s");
+    dialog_show_info("Signatures discarded", body, partial_sign_ack_cb, NULL,
+                     DIALOG_STYLE_FULLSCREEN);
+    return;
+  }
+
+  // Exporting a partly-signed PSBT without saying so is what an attacker
+  // harvesting one signature per session relies on: each round looks like a
+  // clean success. Name the shortfall before the export menu appears.
+  if (sign_result.signed_ok < sign_result.attempted) {
+    char body[320];
+    snprintf(body, sizeof(body),
+             "%zu of %zu inputs belonging to this wallet did not receive a "
+             "signature.\n\n"
+             "The exported PSBT is incomplete. If you did not expect this, do "
+             "not treat the transaction as reviewed -- re-export it from the "
+             "coordinator with full previous transactions and try again.",
+             sign_result.attempted - sign_result.signed_ok,
+             sign_result.attempted);
+    dialog_show_info("Incomplete signing", body, partial_sign_ack_cb, NULL,
+                     DIALOG_STYLE_FULLSCREEN);
+    return;
+  }
+
   show_export_choice();
 }
 
@@ -1750,6 +2128,9 @@ static void cleanup_psbt_data(void) {
   message_sign_free_parsed(&current_message);
   is_message_sign = false;
 
+  bip322_request_free(&current_bip322);
+  is_bip322 = false;
+
   is_testnet = false;
   scanned_qr_format = FORMAT_NONE;
 }
@@ -1804,6 +2185,41 @@ static void create_message_sign_display(void) {
   lv_label_set_long_mode(msg_label, LV_LABEL_LONG_WRAP);
 
   create_sign_action_row(psbt_info_container, message_sign_button_cb);
+}
+
+// Review screen for a PSBT-based BIP322 signing request. Signing goes through
+// the regular PSBT sign path (sign_button_cb), so input ownership is enforced
+// by psbt_sign's classification and the signed PSBT is exported as usual.
+static void create_bip322_sign_display(void) {
+  if (!scan_screen) {
+    return;
+  }
+
+  psbt_info_container = theme_create_scroll_column(scan_screen, 10, 10);
+
+  theme_create_page_title(psbt_info_container, "Sign Message");
+
+  lv_obj_t *addr_title =
+      theme_create_label(psbt_info_container, "Address:", false);
+  theme_apply_label(addr_title, true);
+  lv_obj_set_style_text_color(addr_title, secondary_color(), 0);
+
+  create_address_label(psbt_info_container, current_bip322.address,
+                       highlight_color(), 0);
+
+  theme_create_separator(psbt_info_container, primary_color());
+
+  lv_obj_t *msg_title =
+      theme_create_label(psbt_info_container, "Message:", false);
+  theme_apply_label(msg_title, true);
+  lv_obj_set_style_text_color(msg_title, secondary_color(), 0);
+
+  lv_obj_t *msg_label =
+      theme_create_label(psbt_info_container, current_bip322.message, false);
+  lv_obj_set_width(msg_label, LV_PCT(100));
+  lv_label_set_long_mode(msg_label, LV_LABEL_LONG_WRAP);
+
+  create_sign_action_row(psbt_info_container, sign_button_cb);
 }
 
 static void message_sign_button_cb(lv_event_t *e) {

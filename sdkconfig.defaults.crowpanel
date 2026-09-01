@@ -1,7 +1,17 @@
 # Board: CrowPanel Advanced ESP32-P4 (7" / 10.1", 1024x600 MIPI DSI)
 CONFIG_KERN_BOARD_CROWPANEL=y
+CONFIG_LV_FONT_MONTSERRAT_24=y
+CONFIG_LV_FONT_MONTSERRAT_34=y
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_SD_BUS_WIDTH=1
 CONFIG_SD_INTERNAL_PULLUP=y
 # SC2336 needs the ISP pipeline controller to run AWB/AGC/CCM — without it the image comes out green and clipped. IPA algorithms default to y, so enabling the controller is enough to bring them online via the sensor's default JSON.
 CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER=y
+# IPA is live on this board, so static store would drop nothing; keep the long-proven
+# dynamic-link detect array rather than exercise the blob's --wrap path for no gain.
+CONFIG_ESP_IPA_DETECT_METHOD_DYNAMIC_LINK=y
+# Move the isp_task stack to PSRAM: the controller's stats/AWB loop isn't latency-critical and frees scarce internal DRAM. Safe here — isp_task never writes flash.
+CONFIG_ISP_PIPELINE_CONTROLLER_TASK_STACK_USE_PSRAM=y
+# Custom IPA tuning: the stock eco4 JSON applies gamma 0.518 with no black-level correction, lifting near-black (16/255) to 25% grey. Kern's copy anchors the curve at the sensor pedestal (x<=16 -> 0) with a milder gamma 0.75; everything else matches the eco4 default.
+CONFIG_CAMERA_SC2336_CUSTOMIZED_IPA_JSON_CONFIGURATION_FILE=y
+CONFIG_CAMERA_SC2336_CUSTOMIZED_IPA_JSON_CONFIGURATION_FILE_PATH="components/video/cfg/sc2336_kern.json"

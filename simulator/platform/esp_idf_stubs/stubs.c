@@ -8,6 +8,7 @@
 #include "esp_timer.h"
 #include "esp_spiffs.h"
 #include "esp_app_desc.h"
+#include "esp_mac.h"
 #include "sim_flash.h"
 #include "driver/ppa.h"
 #include <errno.h>
@@ -85,6 +86,8 @@ uint32_t esp_random(void) {
     urandom_read_or_die(&val, sizeof(val));
     return val;
 }
+
+esp_reset_reason_t esp_reset_reason(void) { return ESP_RST_POWERON; }
 
 void esp_fill_random(void *buf, size_t len) {
     urandom_read_or_die(buf, len);
@@ -209,6 +212,17 @@ esp_err_t esp_vfs_spiffs_unregister(const char *partition_label) {
 
 bool esp_spiffs_check(const char *partition_label) {
     return sim_flash_spiffs_check(partition_label);
+}
+
+/* --- eFuse --- */
+
+esp_err_t esp_efuse_mac_get_default(uint8_t *mac) {
+    static const uint8_t s_mac[6] = {0x02, 0x00, 0x00, 0x53, 0x49, 0x4d};
+    if (!mac) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memcpy(mac, s_mac, sizeof(s_mac));
+    return ESP_OK;
 }
 
 /* --- App description --- */

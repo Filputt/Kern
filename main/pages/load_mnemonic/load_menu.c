@@ -1,22 +1,26 @@
 // Load Menu Page
 
 #include "load_menu.h"
-#include "../../core/base43.h"
 #include "../../core/kef.h"
 #include "../../core/storage.h"
 #include "../../qr/scanner.h"
+#include "../../ui/assets/icons.h"
 #include "../../ui/menu.h"
 #include "../../ui/theme_widgets.h"
 #include "../home/home.h"
 #include "../shared/kef_decrypt_page.h"
 #include "../shared/key_confirmation.h"
+#include "../shared/mnemonic_editor.h"
 #include "load_storage.h"
 #include "manual_input.h"
+#include "word_numbers_input.h"
 #include <lvgl.h>
 #include <stdlib.h>
 
 static ui_menu_t *load_menu = NULL;
 static lv_obj_t *load_menu_screen = NULL;
+static ui_menu_t *manual_method_menu = NULL;
+static lv_obj_t *manual_method_screen = NULL;
 static void (*return_callback)(void) = NULL;
 
 static void return_from_key_confirmation_cb(void) {
@@ -53,26 +57,11 @@ static void return_from_qr_scanner_cb(void) {
   qr_scanner_page_destroy();
 
   if (scanned_content) {
-    const uint8_t *envelope = (const uint8_t *)scanned_content;
-    size_t envelope_len = content_len;
-    uint8_t *decoded = NULL;
-    bool is_kef = kef_is_envelope(envelope, envelope_len);
+    size_t envelope_len = 0;
+    uint8_t *envelope = kef_envelope_from_bytes(
+        (const uint8_t *)scanned_content, content_len, &envelope_len);
 
-    if (!is_kef) {
-      /* Try base43 decode (Krux encodes KEF envelopes as base43 for QR) */
-      size_t decoded_len = 0;
-      if (base43_decode(scanned_content, content_len, &decoded, &decoded_len) &&
-          kef_is_envelope(decoded, decoded_len)) {
-        envelope = decoded;
-        envelope_len = decoded_len;
-        is_kef = true;
-      } else {
-        free(decoded);
-        decoded = NULL;
-      }
-    }
-
-    if (is_kef) {
+    if (envelope) {
       kef_decrypt_page_create(lv_screen_active(), return_from_kef_decrypt_cb,
                               success_from_kef_decrypt_cb, envelope,
                               envelope_len);
@@ -83,21 +72,44 @@ static void return_from_qr_scanner_cb(void) {
           success_from_key_confirmation_cb, scanned_content, content_len);
       key_confirmation_page_show();
     }
-    free(decoded);
+    free(envelope);
     free(scanned_content);
   } else {
     load_menu_page_show();
   }
 }
 
-static void return_from_manual_input_cb(void) {
+static void show_manual_method_menu(void);
+
+static void return_from_words_input_cb(void) {
+  mnemonic_editor_page_destroy();
   manual_input_page_destroy();
-  load_menu_page_show();
+  show_manual_method_menu();
+}
+
+static void return_from_word_numbers_cb(void) {
+  mnemonic_editor_page_destroy();
+  word_numbers_input_page_destroy();
+  show_manual_method_menu();
+}
+
+static void destroy_manual_method_menu(void) {
+  if (manual_method_menu) {
+    ui_menu_destroy(manual_method_menu);
+    manual_method_menu = NULL;
+  }
+  if (manual_method_screen) {
+    lv_obj_del(manual_method_screen);
+    manual_method_screen = NULL;
+  }
 }
 
 static void success_from_manual_input_cb(void) {
   key_confirmation_page_destroy();
+  mnemonic_editor_page_destroy();
   manual_input_page_destroy();
+  word_numbers_input_page_destroy();
+  destroy_manual_method_menu();
   load_menu_page_destroy();
   home_page_create(lv_screen_active());
   home_page_show();
@@ -109,11 +121,60 @@ static void from_qr_code_cb(void) {
   qr_scanner_page_show();
 }
 
+static void start_words_input(int word_count) {
+  if (manual_method_menu)
+    ui_menu_hide(manual_method_menu);
+  manual_input_page_create_with_word_count(
+      lv_screen_active(), return_from_words_input_cb,
+      success_from_manual_input_cb, false, word_count);
+  manual_input_page_show();
+}
+
+static void words_12_input_cb(void) { start_words_input(12); }
+
+static void words_24_input_cb(void) { start_words_input(24); }
+
+static void word_numbers_input_cb(void) {
+  if (manual_method_menu)
+    ui_menu_hide(manual_method_menu);
+  word_numbers_input_page_create(lv_screen_active(),
+                                 return_from_word_numbers_cb,
+                                 success_from_manual_input_cb);
+  word_numbers_input_page_show();
+}
+
+static void manual_method_back_cb(void) {
+  destroy_manual_method_menu();
+  load_menu_page_show();
+}
+
+static void show_manual_method_menu(void) {
+  if (!manual_method_screen) {
+    manual_method_screen = theme_create_page_container(lv_screen_active());
+    if (!manual_method_screen) {
+      load_menu_page_show();
+      return;
+    }
+    manual_method_menu = ui_menu_create(manual_method_screen, "Manual Input",
+                                        manual_method_back_cb);
+    if (!manual_method_menu) {
+      lv_obj_del(manual_method_screen);
+      manual_method_screen = NULL;
+      load_menu_page_show();
+      return;
+    }
+    ui_menu_add_entry(manual_method_menu, "12 Words", words_12_input_cb);
+    ui_menu_add_entry(manual_method_menu, "24 Words", words_24_input_cb);
+    ui_menu_add_entry(manual_method_menu, "Input as Numbers",
+                      word_numbers_input_cb);
+    ui_menu_set_entry_secondary(manual_method_menu, 2, true);
+  }
+  ui_menu_show(manual_method_menu);
+}
+
 static void from_manual_input_cb(void) {
   load_menu_page_hide();
-  manual_input_page_create(lv_screen_active(), return_from_manual_input_cb,
-                           success_from_manual_input_cb, false);
-  manual_input_page_show();
+  show_manual_method_menu();
 }
 
 /* --- Load from Flash / SD --- */
@@ -163,10 +224,14 @@ void load_menu_page_create(lv_obj_t *parent, void (*return_cb)(void)) {
   if (!load_menu)
     return;
 
-  ui_menu_add_entry(load_menu, "From QR Code", from_qr_code_cb);
-  ui_menu_add_entry(load_menu, "From Manual Input", from_manual_input_cb);
-  ui_menu_add_entry(load_menu, "From Flash", from_flash_cb);
-  ui_menu_add_entry(load_menu, "From SD Card", from_sd_cb);
+  ui_menu_add_entry_with_icon(load_menu, ICON_QR_CODE, "From QR Code",
+                              from_qr_code_cb);
+  ui_menu_add_entry_with_icon(load_menu, LV_SYMBOL_KEYBOARD,
+                              "From Manual Input", from_manual_input_cb);
+  ui_menu_add_entry_with_icon(load_menu, LV_SYMBOL_DRIVE, "From Flash",
+                              from_flash_cb);
+  ui_menu_add_entry_with_icon(load_menu, ICON_SD_CARD, "From SD Card",
+                              from_sd_cb);
   ui_menu_show(load_menu);
 }
 
@@ -181,6 +246,7 @@ void load_menu_page_hide(void) {
 }
 
 void load_menu_page_destroy(void) {
+  destroy_manual_method_menu();
   if (load_menu) {
     ui_menu_destroy(load_menu);
     load_menu = NULL;

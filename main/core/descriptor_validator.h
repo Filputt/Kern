@@ -1,6 +1,7 @@
 #ifndef DESCRIPTOR_VALIDATOR_H
 #define DESCRIPTOR_VALIDATOR_H
 
+#include "../utils/attributes.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -36,6 +37,11 @@ typedef enum {
    * PSBT_MAX_INNER_SCRIPT_LEN (520) bytes. Without this check the descriptor
    * would register but fail at address derivation and signing. */
   VALIDATION_UNSUPPORTED_SCRIPT,
+  /* tr() script-tree descriptor whose internal (key-path) key is a bare key
+   * with no origin that is not a known NUMS point: it is neither provably
+   * unspendable nor attributable, so the key-path can silently bypass the
+   * script policy. Rejected outright (matches Krux). */
+  VALIDATION_TR_INTERNAL_NOT_UNSPENDABLE,
 } descriptor_validation_result_t;
 
 typedef void (*validation_complete_cb)(descriptor_validation_result_t result,
@@ -47,6 +53,16 @@ typedef void (*validation_complete_cb)(descriptor_validation_result_t result,
 typedef void (*validation_confirm_cb)(const char *message,
                                       void (*proceed)(bool confirmed,
                                                       void *user_data));
+
+/* Taproot internal-key (key-path) classification for tr() descriptors. The
+ * internal key is descriptor key index 0; for a tr() with a script tree it
+ * decides whether the policy can be bypassed by a unilateral key-path spend. */
+typedef enum {
+  TR_KEYPATH_NONE = 0, /* not a tr() descriptor */
+  TR_KEYPATH_OURS,     /* internal key is ours — key-path spendable by us */
+  TR_KEYPATH_NUMS,     /* internal key is a known NUMS point — unspendable */
+  TR_KEYPATH_EXTERNAL, /* internal key is an external key — can spend alone */
+} tr_keypath_class_t;
 
 /* Descriptor info for confirmation display. One letter ID per key; the
  * script-size validation (VALIDATION_UNSUPPORTED_SCRIPT) guarantees loadable
@@ -65,6 +81,8 @@ typedef struct {
   /* Miniscript only: descriptor with key expressions replaced by their
    * letter IDs (A, B, ...). Empty if unavailable. */
   char policy[512];
+  /* tr() only: classification of the taproot internal (key-path) key. */
+  tr_keypath_class_t tr_keypath;
 } descriptor_info_t;
 
 // UI-agnostic info confirmation callback: show descriptor info, call proceed()
@@ -100,8 +118,9 @@ void descriptor_validate_and_load(const char *descriptor_str,
  * if the descriptor parses on neither (xpub keys parse only on mainnet, tpub
  * only on testnet, so the result is unambiguous for extended-key descriptors).
  */
-bool descriptor_infer_network(const char *descriptor_str,
-                              wallet_network_t *network_out);
+KERN_WARN_UNUSED_RESULT bool
+descriptor_infer_network(const char *descriptor_str,
+                         wallet_network_t *network_out);
 
 /* Watch-only (keyless) variant of descriptor_validate_and_load: validates and
  * loads a descriptor for address viewing without a loaded master key. Skips the
@@ -120,6 +139,7 @@ void descriptor_validate_and_load_watch_only(
  * duplicate ID is pending (e.g. result was not DUPLICATE, or the buffer is
  * too small). The pending ID is reset on the next descriptor_validate_and_load
  * call. */
-bool descriptor_validator_get_duplicate_id(char *out, size_t out_len);
+KERN_WARN_UNUSED_RESULT bool
+descriptor_validator_get_duplicate_id(char *out, size_t out_len);
 
 #endif // DESCRIPTOR_VALIDATOR_H

@@ -20,6 +20,9 @@ endif()
 # Board feature flags
 if(SIM_BOARD STREQUAL "wave_35")
   set(BSP_HAS_PMIC TRUE)
+elseif(SIM_BOARD STREQUAL "wave_43" OR SIM_BOARD STREQUAL "wave_5"
+       OR SIM_BOARD STREQUAL "wave_7b")
+  set(BSP_BATTERY_ADC TRUE)
 endif()
 
 find_package(SDL2 REQUIRED)
@@ -53,7 +56,7 @@ set(WALLY_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../components/libwally-core)
 add_library(wally STATIC
     ${WALLY_DIR}/upstream/src/amalgamation/combined.c
 )
-
+set_target_properties(wally PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(wally PUBLIC
     ${WALLY_DIR}/upstream/include
 )
@@ -82,6 +85,8 @@ target_include_directories(wally PRIVATE
 target_compile_definitions(wally PRIVATE
     BUILD_ELEMENTS=0
     BUILD_MINIMAL=1
+    # Standard libsecp256k1: drops MuSig2 + ecdsa-s2c/anti-exfil (unused by Kern).
+    BUILD_STANDARD_SECP=1
     ECMULT_WINDOW_SIZE=8
     ENABLE_MODULE_ECDH=1
     ENABLE_MODULE_ECDSA_S2C=1
@@ -128,14 +133,20 @@ set(APP_UI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../main/ui)
 set(SIM_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/main_sim.c
     ${CMAKE_CURRENT_SOURCE_DIR}/platform/esp_idf_stubs/stubs.c
+    ${APP_UI_DIR}/entropy_input.c
     ${APP_UI_DIR}/font_policy.c
     ${APP_UI_DIR}/theme.c
     ${APP_UI_DIR}/theme_widgets.c
     ${APP_UI_DIR}/assets/kern_logo_lvgl.c
     ${APP_UI_DIR}/assets/kern_logo_font.c
     ${APP_UI_DIR}/assets/icons_16.c
+    ${APP_UI_DIR}/assets/icons_22.c
     ${APP_UI_DIR}/assets/icons_24.c
-    ${APP_UI_DIR}/assets/icons_36.c
+    ${APP_UI_DIR}/assets/icons_28.c
+    ${APP_UI_DIR}/assets/icons_30.c
+    ${APP_UI_DIR}/assets/icons_32.c
+    ${APP_UI_DIR}/assets/icons_34.c
+    ${APP_UI_DIR}/assets/icons_40.c
 )
 
 # --- ESP-IDF stubs (NVS, FreeRTOS, eFuse, storage) ---
@@ -145,20 +156,26 @@ set(STUB_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/platform/esp_idf_stubs/sim_storage_hooks.c
     ${CMAKE_CURRENT_SOURCE_DIR}/platform/esp_idf_stubs/efuse_hmac_sim.c
     ${CMAKE_CURRENT_SOURCE_DIR}/platform/esp_idf_stubs/freertos_sim.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/platform/esp_idf_stubs/fw_update_sim.c
 )
 
 # --- Application utilities ---
 set(APP_UTIL_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/utils/bip39_filter.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../main/utils/dice_quality.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../main/utils/estimated_entropy.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/utils/session.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../main/utils/worker_task.c
 )
 
 # --- Core application modules ---
 set(APP_CORE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/settings.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/nvs_secure.c
     ${CMAKE_CURRENT_SOURCE_DIR}/platform/esp_idf_stubs/storage_sim.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/pin.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/crypto_utils.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/entropy_pool.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/kef.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/wallet.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/base43.c
@@ -166,14 +183,16 @@ set(APP_CORE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/miniscript_policy.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/key.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/message_sign.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/bip322.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/psbt.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/psbt_parse.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/ss_whitelist.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/registry.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/descriptor_checksum.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/bip32_path.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/script_templates.c
-    # miniz (used by kef.c for raw-deflate compression)
-    ${CMAKE_CURRENT_SOURCE_DIR}/../components/bbqr/src/miniz.c
+    # Shared zlib adapter used by KEF and BBQr
+    ${CMAKE_CURRENT_SOURCE_DIR}/../components/deflate_codec/src/deflate_codec.c
     # bbqr (multi-part QR encoding)
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/bbqr/src/bbqr.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/bbqr/src/base32.c
@@ -182,6 +201,7 @@ set(APP_CORE_SOURCES
 # --- UI components ---
 set(APP_UI_SOURCES
     ${APP_UI_DIR}/dialog.c
+    ${APP_UI_DIR}/dropdown_page.c
     ${APP_UI_DIR}/input_helpers.c
     ${APP_UI_DIR}/keyboard.c
     ${APP_UI_DIR}/menu.c
@@ -241,6 +261,7 @@ if(SIM_WEBCAM)
             ${CMAKE_CURRENT_SOURCE_DIR}/platform/video_sim/v4l2_capture.c
         )
     endif()
+    set_target_properties(v4l2_capture PROPERTIES POSITION_INDEPENDENT_CODE ON)
     target_include_directories(v4l2_capture PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/platform/video_sim/include
         ${CMAKE_CURRENT_SOURCE_DIR}/platform/video_sim
@@ -255,11 +276,13 @@ set(APP_PAGE_SOURCES
     ${APP_PAGES_DIR}/login/login.c
     ${APP_PAGES_DIR}/login/login_scan.c
     ${APP_PAGES_DIR}/login/login_settings.c
+    ${APP_PAGES_DIR}/login/security_settings.c
     ${APP_PAGES_DIR}/login/about.c
     # Load mnemonic
     ${APP_PAGES_DIR}/load_mnemonic/load_menu.c
     ${APP_PAGES_DIR}/load_mnemonic/load_storage.c
     ${APP_PAGES_DIR}/load_mnemonic/manual_input.c
+    ${APP_PAGES_DIR}/load_mnemonic/word_numbers_input.c
     # New mnemonic
     ${APP_PAGES_DIR}/new_mnemonic/new_mnemonic_menu.c
     ${APP_PAGES_DIR}/new_mnemonic/dice_rolls.c
@@ -277,6 +300,7 @@ set(APP_PAGE_SOURCES
     ${APP_PAGES_DIR}/settings/descriptor_manager.c
     ${APP_PAGES_DIR}/settings/wallet_settings.c
     ${APP_PAGES_DIR}/settings/registered_descriptors.c
+    ${APP_PAGES_DIR}/settings/firmware_update.c
     # Shared pages
     ${APP_PAGES_DIR}/shared/address_checker.c
     ${APP_PAGES_DIR}/shared/descriptor_loader.c
@@ -289,9 +313,11 @@ set(APP_PAGE_SOURCES
     ${APP_PAGES_DIR}/shared/wipe_flash_dialog.c
     # Top-level pages
     ${APP_PAGES_DIR}/capture_entropy.c
+    ${APP_PAGES_DIR}/disclaimer.c
     ${APP_PAGES_DIR}/load_descriptor_storage.c
     ${APP_PAGES_DIR}/passphrase.c
     ${APP_PAGES_DIR}/screensaver.c
+    ${APP_PAGES_DIR}/session_lock.c
     ${APP_PAGES_DIR}/store_descriptor.c
     ${APP_PAGES_DIR}/store_mnemonic.c
     # Scan page
@@ -299,10 +325,6 @@ set(APP_PAGE_SOURCES
     ${APP_PAGES_DIR}/scan/psbt_sign_policy.c
     # Load page
     ${APP_PAGES_DIR}/load/load.c
-    # Dev tools
-    ${APP_PAGES_DIR}/dev_tools/dev_menu.c
-    ${APP_PAGES_DIR}/dev_tools/snapshot.c
-    ${APP_PAGES_DIR}/dev_tools/decode_snapshots.c
 )
 
 # --- QR + k_quirc + cUR ---
@@ -319,6 +341,7 @@ file(GLOB_RECURSE CUR_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/../components/cUR/src/
 add_library(lvgl STATIC
     ${LVGL_SOURCES}
 )
+set_target_properties(lvgl PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(lvgl PUBLIC
     ${LVGL_DIR}
     ${LVGL_DIR}/src
@@ -362,9 +385,10 @@ target_include_directories(kern_simulator PRIVATE
     ${MBEDTLS_INCLUDE_DIRS}
     # Application source tree
     ${CMAKE_CURRENT_SOURCE_DIR}/../main                 # ui/theme.h, core/, utils/, pages/
-    # Component headers (for kef.c -> bbqr/miniz, cUR, k_quirc, video)
+    # Component headers (for kef.c -> deflate_codec, cUR, k_quirc, video)
     ${CMAKE_CURRENT_SOURCE_DIR}/../components
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/bbqr/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../components/deflate_codec/src
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/k_quirc/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/k_quirc/src
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/cUR/src
@@ -383,11 +407,13 @@ target_compile_definitions(kern_simulator PRIVATE
     K_QUIRC_BILINEAR_THRESHOLD
     $<$<BOOL:${SIM_WEBCAM}>:SIM_WEBCAM=1>
     $<$<BOOL:${BSP_HAS_PMIC}>:BSP_HAS_PMIC=1>
+    $<$<BOOL:${BSP_BATTERY_ADC}>:BSP_BATTERY_ADC=1>
     $<$<STREQUAL:${SIM_BOARD},wave_4b>:CONFIG_KERN_BOARD_WAVE_4B=1>
     $<$<STREQUAL:${SIM_BOARD},wave_35>:CONFIG_KERN_BOARD_WAVE_35=1>
     $<$<STREQUAL:${SIM_BOARD},wave_5>:CONFIG_KERN_BOARD_WAVE_5=1>
     $<$<STREQUAL:${SIM_BOARD},wave_43>:CONFIG_KERN_BOARD_WAVE_43=1>
     $<$<STREQUAL:${SIM_BOARD},crowpanel>:CONFIG_KERN_BOARD_CROWPANEL=1>
+    $<$<STREQUAL:${SIM_BOARD},wave_7b>:CONFIG_KERN_BOARD_WAVE_7B=1>
 )
 
 target_compile_options(kern_simulator PRIVATE
@@ -397,6 +423,9 @@ target_compile_options(kern_simulator PRIVATE
     -Wno-sign-compare
     -Wno-missing-field-initializers
     -Wno-type-limits
+    # Matches the firmware build: the k_quirc and cUR entry points report
+    # failure only through their return value.
+    -Werror=unused-result
     -include mbedtls_compat.h
     # Hardening — the simulator parses untrusted input (image files, NVS
     # files, V4L2 frames). These flags are cheap and standard for any host
@@ -427,15 +456,19 @@ target_link_libraries(kern_simulator PRIVATE
     ${MBEDTLS_LIB}
     ${MBEDCRYPTO_LIB}
     ${MBEDX509_LIB}
+    z
     $<$<BOOL:${SIM_WEBCAM}>:v4l2_capture>
 )
 
 add_executable(kern_sim_storage_smoke
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/storage_smoke.c
     ${CMAKE_CURRENT_SOURCE_DIR}/platform/esp_idf_stubs/storage_sim.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/platform/esp_idf_stubs/freertos_sim.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/kef.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/base43.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/crypto_utils.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../components/bbqr/src/miniz.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../main/core/entropy_pool.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../components/deflate_codec/src/deflate_codec.c
     ${CMAKE_CURRENT_SOURCE_DIR}/platform/esp_idf_stubs/stubs.c
     ${CMAKE_CURRENT_SOURCE_DIR}/platform/esp_idf_stubs/sim_flash.c
     ${CMAKE_CURRENT_SOURCE_DIR}/platform/esp_idf_stubs/sim_storage_hooks.c
@@ -450,7 +483,7 @@ target_include_directories(kern_sim_storage_smoke PRIVATE
     ${MBEDTLS_INCLUDE_DIRS}
     ${CMAKE_CURRENT_SOURCE_DIR}/../main
     ${CMAKE_CURRENT_SOURCE_DIR}/../components
-    ${CMAKE_CURRENT_SOURCE_DIR}/../components/bbqr/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../components/deflate_codec/src
 )
 
 target_compile_definitions(kern_sim_storage_smoke PRIVATE
@@ -466,9 +499,11 @@ target_compile_options(kern_sim_storage_smoke PRIVATE
 
 target_link_libraries(kern_sim_storage_smoke PRIVATE
     m
+    pthread
     ${MBEDTLS_LIB}
     ${MBEDCRYPTO_LIB}
     ${MBEDX509_LIB}
+    z
 )
 
 enable_testing()

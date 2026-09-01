@@ -8,7 +8,7 @@
 #include "../../qr/encoder.h"
 #include "../../qr/scanner.h"
 #include "../../qr/viewer.h"
-#include "../../ui/assets/icons_36.h"
+#include "../../ui/assets/icons.h"
 #include "../../ui/dialog.h"
 #include "../../ui/input_helpers.h"
 #include "../../ui/key_info.h"
@@ -421,7 +421,7 @@ void addresses_page_create(lv_obj_t *parent, void (*return_cb)(void)) {
   lv_obj_set_flex_flow(addresses_screen, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_flex_align(addresses_screen, LV_FLEX_ALIGN_START,
                         LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-  lv_obj_set_style_pad_gap(addresses_screen, theme_default_padding(), 0);
+  lv_obj_set_style_pad_gap(addresses_screen, theme_small_padding(), 0);
 
   // Key info bar at top, aligned with the corner buttons. With no loaded key
   // (watch-only) it self-omits; reserve the same corner-button band with a
@@ -478,6 +478,8 @@ void addresses_page_create(lv_obj_t *parent, void (*return_cb)(void)) {
   lv_obj_set_flex_align(address_list_container, LV_FLEX_ALIGN_START,
                         LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER);
   lv_obj_set_flex_grow(address_list_container, 1);
+  lv_obj_set_style_pad_row(address_list_container, theme_small_padding() / 2,
+                           0);
 
   refresh_address_list();
 

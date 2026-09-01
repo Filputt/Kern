@@ -131,7 +131,9 @@ static void registry_init_scan(storage_location_t loc) {
         id_len = REGISTRY_ID_MAX_LEN - 1;
       memcpy(id, fname, id_len);
       id[id_len] = '\0';
-      registry_add_from_string(id, desc_str, loc, false);
+      if (!registry_add_from_string(id, desc_str, loc, false))
+        ESP_LOGW(TAG, "Skipping stored descriptor '%s': failed to register",
+                 id);
       free(desc_str);
     }
     free(data);
@@ -158,11 +160,11 @@ static char *descriptor_checksum_alloc(const char *descriptor_str) {
                      ? WALLY_NETWORK_BITCOIN_MAINNET
                      : WALLY_NETWORK_BITCOIN_TESTNET;
   struct wally_descriptor *desc = NULL;
-  if (wally_descriptor_parse(descriptor_str, NULL, net, 0, &desc) != WALLY_OK) {
+  if (wallet_descriptor_parse(descriptor_str, NULL, net, &desc) != WALLY_OK) {
     net = (net == WALLY_NETWORK_BITCOIN_MAINNET)
               ? WALLY_NETWORK_BITCOIN_TESTNET
               : WALLY_NETWORK_BITCOIN_MAINNET;
-    if (wally_descriptor_parse(descriptor_str, NULL, net, 0, &desc) != WALLY_OK)
+    if (wallet_descriptor_parse(descriptor_str, NULL, net, &desc) != WALLY_OK)
       return NULL;
   }
   char checksum[9];
@@ -281,8 +283,7 @@ bool registry_add_from_string(const char *id, const char *descriptor_str,
                                ? WALLY_NETWORK_BITCOIN_MAINNET
                                : WALLY_NETWORK_BITCOIN_TESTNET;
   struct wally_descriptor *desc = NULL;
-  int ret =
-      wally_descriptor_parse(descriptor_str, NULL, wally_network, 0, &desc);
+  int ret = wallet_descriptor_parse(descriptor_str, NULL, wally_network, &desc);
   if (ret != WALLY_OK) {
     ESP_LOGE(TAG, "failed to parse descriptor: %d", ret);
     return false;
@@ -386,7 +387,7 @@ bool registry_add_watch_only(const char *id, const char *descriptor_str,
                                ? WALLY_NETWORK_BITCOIN_MAINNET
                                : WALLY_NETWORK_BITCOIN_TESTNET;
   struct wally_descriptor *desc = NULL;
-  if (wally_descriptor_parse(descriptor_str, NULL, wally_network, 0, &desc) !=
+  if (wallet_descriptor_parse(descriptor_str, NULL, wally_network, &desc) !=
       WALLY_OK) {
     ESP_LOGE(TAG, "failed to parse watch-only descriptor");
     return false;

@@ -2,7 +2,6 @@
 // descriptor, else show the raw content as unidentified.
 
 #include "login_scan.h"
-#include "../../core/base43.h"
 #include "../../core/kef.h"
 #include "../../core/registry.h"
 #include "../../core/wallet.h"
@@ -17,6 +16,7 @@
 #include "../shared/key_confirmation.h"
 #include <lvgl.h>
 #include <stdlib.h>
+#include <string.h>
 #include <wally_bip39.h>
 #include <wally_core.h>
 
@@ -86,6 +86,21 @@ static void show_unidentified(void) {
                    unidentified_dismissed_cb, NULL, DIALOG_STYLE_OVERLAY);
 }
 
+static void show_psbt_needs_key(void) {
+  dialog_show_info("PSBT detected", "Load a key first to sign transactions",
+                   unidentified_dismissed_cb, NULL, DIALOG_STYLE_OVERLAY);
+}
+
+static bool is_psbt_content(const char *content, size_t len) {
+  if (!content)
+    return false;
+  if (len >= 6 && strncmp(content, "cHNidP", 6) == 0)
+    return true;
+  if (len >= 5 && memcmp(content, "psbt\xff", 5) == 0)
+    return true;
+  return false;
+}
+
 static void wo_validation_cb(descriptor_validation_result_t result,
                              void *user_data) {
   (void)user_data;
@@ -111,31 +126,17 @@ static void wo_validation_cb(descriptor_validation_result_t result,
 
 // Returns true if the content was handled as a mnemonic (KEF or plaintext).
 static bool try_mnemonic(const char *content, size_t len) {
-  const uint8_t *envelope = (const uint8_t *)content;
-  size_t envelope_len = len;
-  uint8_t *decoded = NULL;
-  bool is_kef = kef_is_envelope(envelope, envelope_len);
-  if (!is_kef) {
-    size_t decoded_len = 0;
-    if (base43_decode(content, len, &decoded, &decoded_len) &&
-        kef_is_envelope(decoded, decoded_len)) {
-      envelope = decoded;
-      envelope_len = decoded_len;
-      is_kef = true;
-    } else {
-      free(decoded);
-      decoded = NULL;
-    }
-  }
-  if (is_kef) {
+  size_t envelope_len = 0;
+  uint8_t *envelope =
+      kef_envelope_from_bytes((const uint8_t *)content, len, &envelope_len);
+  if (envelope) {
     kef_decrypt_page_create(lv_screen_active(), return_from_kef_decrypt_cb,
                             success_from_kef_decrypt_cb, envelope,
                             envelope_len);
     kef_decrypt_page_show();
-    free(decoded);
+    free(envelope);
     return true;
   }
-  free(decoded);
 
   // Plaintext / SeedQR: only treat as a mnemonic if it actually validates, so
   // descriptors fall through to the watch-only path.
@@ -155,8 +156,13 @@ static bool try_mnemonic(const char *content, size_t len) {
 static void on_scan_done(void) {
   size_t len = 0;
   char *content = qr_scanner_get_completed_content_with_len(&len);
-  // Extract a descriptor candidate (handles UR crypto-output/account + plain
-  // text) while the scanner state is still valid.
+  // UR type and descriptor candidate (UR crypto-output/account + plain text)
+  // must be read while the scanner state is still valid.
+  const char *ur_type = NULL;
+  bool has_ur = qr_scanner_get_ur_result(&ur_type, NULL, NULL);
+  bool psbt_scanned =
+      (has_ur && ur_type && strcmp(ur_type, "crypto-psbt") == 0) ||
+      is_psbt_content(content, len);
   char *desc_candidate = descriptor_extract_from_scanner();
 
   qr_scanner_page_hide();
@@ -164,6 +170,12 @@ static void on_scan_done(void) {
 
   s_scan_content =
       content; // owned here; freed by finish_to_login/clear_content
+
+  if (psbt_scanned) {
+    free(desc_candidate);
+    show_psbt_needs_key();
+    return;
+  }
 
   if (!content && !desc_candidate) {
     finish_to_login();

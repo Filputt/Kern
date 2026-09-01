@@ -3,12 +3,12 @@
 #include "bsp/touch.h"
 #include "bsp_err_check.h"
 #include "driver/gpio.h"
+#include "driver/i2c_master.h"
 #include "driver/ledc.h"
 #include "esp_check.h"
 #include "esp_err.h"
 #include "esp_lcd_hx8394.h"
 #include "esp_lcd_mipi_dsi.h"
-#include "driver/i2c_master.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_touch_gt911.h"
 #include "esp_ldo_regulator.h"
@@ -22,6 +22,22 @@ static const char *TAG = "wave_5";
 
 static bool i2c_initialized = false;
 static i2c_master_bus_handle_t i2c_handle = NULL;
+
+esp_err_t bsp_wifi_coproc_disable(void) {
+  /* Output latch defaults to 0, so enabling the driver already pulls CHIP_EN
+   * low against the external pull-up. */
+  const gpio_config_t en_cfg = {
+      .pin_bit_mask = 1ULL << BSP_C6_WIFI_EN,
+      .mode = GPIO_MODE_OUTPUT,
+  };
+  BSP_ERROR_CHECK_RETURN_ERR(gpio_config(&en_cfg));
+  BSP_ERROR_CHECK_RETURN_ERR(gpio_set_level(BSP_C6_WIFI_EN, 0));
+  /* Latch the pad so CHIP_EN stays low through soft/WDT resets; only a
+   * power-on reset releases it. */
+  BSP_ERROR_CHECK_RETURN_ERR(gpio_hold_en(BSP_C6_WIFI_EN));
+  ESP_LOGI(TAG, "ESP32-C6 held in reset");
+  return ESP_OK;
+}
 
 esp_err_t bsp_i2c_init(void) {
   if (i2c_initialized) {
@@ -300,8 +316,8 @@ esp_err_t bsp_touch_new(const bsp_touch_config_t *config,
     ESP_LOGI(TAG, "GT911 found at 0x%02X", ESP_LCD_TOUCH_IO_I2C_GT911_ADDRESS);
     esp_lcd_panel_io_i2c_config_t cfg = ESP_LCD_TOUCH_IO_I2C_GT911_CONFIG();
     memcpy(&tp_io_config, &cfg, sizeof(cfg));
-  } else if (bsp_i2c_device_probe(
-                 ESP_LCD_TOUCH_IO_I2C_GT911_ADDRESS_BACKUP) == ESP_OK) {
+  } else if (bsp_i2c_device_probe(ESP_LCD_TOUCH_IO_I2C_GT911_ADDRESS_BACKUP) ==
+             ESP_OK) {
     ESP_LOGI(TAG, "GT911 found at 0x%02X",
              ESP_LCD_TOUCH_IO_I2C_GT911_ADDRESS_BACKUP);
     esp_lcd_panel_io_i2c_config_t cfg = ESP_LCD_TOUCH_IO_I2C_GT911_CONFIG();

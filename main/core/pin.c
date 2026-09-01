@@ -3,6 +3,7 @@
 #include "pin.h"
 #include "../utils/secure_mem.h"
 #include "crypto_utils.h"
+#include "pin_attempt.h"
 #include "settings.h"
 #include "storage.h"
 
@@ -23,7 +24,6 @@ static const char *KEY_PIN_HASH = "pin_hash";
 static const char *KEY_SPLIT_POS = "split_pos";
 static const char *KEY_FAIL_CNT = "fail_cnt";
 static const char *KEY_MAX_FAIL = "max_fail";
-static const char *KEY_TIMEOUT = "timeout";
 static const char *KEY_HAS_EFUSE = "has_efuse";
 
 // Salt derivation tags
@@ -77,6 +77,13 @@ esp_err_t pin_init(void) {
   return ESP_OK;
 }
 
+void pin_deinit(void) {
+  if (!initialized)
+    return;
+  nvs_close(pin_nvs);
+  initialized = false;
+}
+
 // ---------------------------------------------------------------------------
 // eFuse
 // ---------------------------------------------------------------------------
@@ -102,7 +109,11 @@ esp_err_t pin_efuse_provision(void) {
 
   // Generate random 256-bit key
   uint8_t key[32];
-  crypto_random_bytes(key, sizeof(key));
+  if (crypto_random_bytes(key, sizeof(key)) != CRYPTO_OK) {
+    secure_memzero(key, sizeof(key));
+    ESP_LOGE(TAG, "Failed to generate eFuse key");
+    return ESP_FAIL;
+  }
 
   esp_err_t err = esp_efuse_write_key(
       EFUSE_BLK_KEY5, ESP_EFUSE_KEY_PURPOSE_HMAC_UP, key, sizeof(key));
@@ -245,13 +256,10 @@ esp_err_t pin_setup(const char *pin, size_t len, uint8_t split_pos) {
   // Reset failure count
   nvs_set_u8(pin_nvs, KEY_FAIL_CNT, 0);
 
-  // Set defaults for max_fail and timeout if not already configured
+  // Set default for max_fail if not already configured
   uint8_t tmp8;
   if (nvs_get_u8(pin_nvs, KEY_MAX_FAIL, &tmp8) != ESP_OK)
     nvs_set_u8(pin_nvs, KEY_MAX_FAIL, PIN_DEFAULT_MAX_FAILURES);
-  uint16_t tmp16;
-  if (nvs_get_u16(pin_nvs, KEY_TIMEOUT, &tmp16) != ESP_OK)
-    nvs_set_u16(pin_nvs, KEY_TIMEOUT, PIN_DEFAULT_TIMEOUT_SEC);
 
   // Record eFuse availability
   uint8_t has_efuse = (pin_efuse_check() == PIN_EFUSE_PROVISIONED) ? 1 : 0;
@@ -269,6 +277,7 @@ pin_verify_result_t pin_verify(const char *pin, size_t len) {
 
   uint8_t max_fail = PIN_DEFAULT_MAX_FAILURES;
   nvs_get_u8(pin_nvs, KEY_MAX_FAIL, &max_fail);
+  max_fail = pin_attempt_clamp_max_failures(max_fail);
 
   // Pre-increment failure count and commit before the slow PBKDF2 so that
   // a power-cut during verification cannot gift the attacker a free attempt.
@@ -301,15 +310,6 @@ pin_verify_result_t pin_verify(const char *pin, size_t len) {
     return PIN_VERIFY_WRONG;
   }
 
-  // Check wipe threshold after PBKDF2 (uniform timing)
-  if (pending_cnt >= max_fail) {
-    secure_memzero(attempt_hash, sizeof(attempt_hash));
-    ESP_LOGW(TAG, "Max failures reached (%u/%u), wiping device", pending_cnt,
-             max_fail);
-    pin_wipe_all();
-    return PIN_VERIFY_WIPED; // unreachable
-  }
-
   // Load stored hash
   uint8_t stored_hash[PIN_HASH_SIZE];
   size_t hash_len = PIN_HASH_SIZE;
@@ -317,6 +317,10 @@ pin_verify_result_t pin_verify(const char *pin, size_t len) {
   if (err != ESP_OK || hash_len != PIN_HASH_SIZE) {
     secure_memzero(attempt_hash, sizeof(attempt_hash));
     secure_memzero(stored_hash, sizeof(stored_hash));
+    if (pending_cnt >= max_fail) {
+      pin_wipe_all();
+      return PIN_VERIFY_WIPED; // unreachable
+    }
     return PIN_VERIFY_WRONG;
   }
 
@@ -325,20 +329,24 @@ pin_verify_result_t pin_verify(const char *pin, size_t len) {
   secure_memzero(attempt_hash, sizeof(attempt_hash));
   secure_memzero(stored_hash, sizeof(stored_hash));
 
-  if (match == 0) {
+  pin_attempt_decision_t decision =
+      pin_attempt_decide(match == 0, pending_cnt, max_fail);
+  if (decision == PIN_ATTEMPT_ACCEPT) {
     // Correct PIN — roll back the pre-incremented failure count
     nvs_set_u8(pin_nvs, KEY_FAIL_CNT, 0);
     nvs_commit(pin_nvs);
     return PIN_VERIFY_OK;
   }
 
+  if (decision == PIN_ATTEMPT_WIPE) {
+    ESP_LOGW(TAG, "Max failures reached (%u/%u), wiping device", pending_cnt,
+             max_fail);
+    pin_wipe_all();
+    return PIN_VERIFY_WIPED; // unreachable
+  }
+
   // Wrong PIN — failure count was already persisted above
   return PIN_VERIFY_DELAY;
-}
-
-esp_err_t pin_change(const char *new_pin, size_t len, uint8_t split_pos) {
-  // Caller must verify old PIN first via pin_verify()
-  return pin_setup(new_pin, len, split_pos);
 }
 
 esp_err_t pin_remove(void) {
@@ -387,7 +395,7 @@ uint8_t pin_get_max_failures(void) {
     return PIN_DEFAULT_MAX_FAILURES;
   uint8_t val = PIN_DEFAULT_MAX_FAILURES;
   nvs_get_u8(pin_nvs, KEY_MAX_FAIL, &val);
-  return val;
+  return pin_attempt_clamp_max_failures(val);
 }
 
 bool pin_has_anti_phishing(void) {
@@ -398,27 +406,10 @@ bool pin_has_anti_phishing(void) {
   return val != 0;
 }
 
-uint16_t pin_get_session_timeout(void) {
-  if (!initialized)
-    return PIN_DEFAULT_TIMEOUT_SEC;
-  uint16_t val = PIN_DEFAULT_TIMEOUT_SEC;
-  nvs_get_u16(pin_nvs, KEY_TIMEOUT, &val);
-  return val;
-}
-
-esp_err_t pin_set_session_timeout(uint16_t sec) {
-  if (!initialized)
-    return ESP_ERR_INVALID_STATE;
-  esp_err_t err = nvs_set_u16(pin_nvs, KEY_TIMEOUT, sec);
-  if (err != ESP_OK)
-    return err;
-  return nvs_commit(pin_nvs);
-}
-
 esp_err_t pin_set_max_failures(uint8_t max) {
   if (!initialized)
     return ESP_ERR_INVALID_STATE;
-  if (max < 5 || max > 50)
+  if (max < PIN_MIN_MAX_FAILURES || max > PIN_MAX_MAX_FAILURES)
     return ESP_ERR_INVALID_ARG;
   esp_err_t err = nvs_set_u8(pin_nvs, KEY_MAX_FAIL, max);
   if (err != ESP_OK)
@@ -430,7 +421,7 @@ esp_err_t pin_set_max_failures(uint8_t max) {
 // Wipe
 // ---------------------------------------------------------------------------
 
-esp_err_t pin_wipe_all(void) {
+void pin_wipe_all(void) {
   ESP_LOGW(TAG, "Wiping all data");
 
   // Erase PIN NVS namespace
@@ -440,12 +431,26 @@ esp_err_t pin_wipe_all(void) {
   }
 
   // Reset settings
-  settings_reset_all();
+  esp_err_t err = settings_reset_all();
+  if (err != ESP_OK)
+    ESP_LOGE(TAG, "Settings reset failed: %s", esp_err_to_name(err));
 
-  // Wipe flash storage
-  storage_init(); // Ensure SPIFFS is mounted
-  storage_wipe_flash();
+  // Wipe flash storage. storage_wipe_flash() erases the partition directly, so
+  // a failed mount does not stop it - log and go on rather than skipping it.
+  err = storage_init();
+  if (err != ESP_OK)
+    ESP_LOGE(TAG, "Storage mount before wipe failed: %s", esp_err_to_name(err));
+
+  err = storage_wipe_flash();
+  if (err != ESP_OK) {
+    // Restarting on a failed wipe would report a wipe that never happened and
+    // leave stored wallets on flash, so try once more before giving up.
+    ESP_LOGE(TAG, "Flash wipe failed: %s, retrying", esp_err_to_name(err));
+    err = storage_wipe_flash();
+    if (err != ESP_OK)
+      ESP_LOGE(TAG, "Flash wipe failed again: %s - data may remain on flash",
+               esp_err_to_name(err));
+  }
 
   esp_restart();
-  return ESP_OK; // unreachable
 }

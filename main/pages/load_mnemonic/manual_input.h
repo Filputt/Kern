@@ -24,6 +24,23 @@ void manual_input_page_create(lv_obj_t *parent, void (*return_cb)(void),
                               bool checksum_filter_last_word);
 
 /**
+ * @brief Create the manual input page with a preselected mnemonic length
+ *
+ * @param parent Parent LVGL object where the page will be created
+ * @param return_cb Callback function to call when returning to previous page
+ * @param success_cb Callback function to call when mnemonic is successfully
+ * loaded
+ * @param checksum_filter_last_word If true, only show checksum-valid words for
+ * the last word position
+ * @param word_count Mnemonic length; must be 12 or 24
+ */
+void manual_input_page_create_with_word_count(lv_obj_t *parent,
+                                              void (*return_cb)(void),
+                                              void (*success_cb)(void),
+                                              bool checksum_filter_last_word,
+                                              int word_count);
+
+/**
  * @brief Show the manual input page
  */
 void manual_input_page_show(void);

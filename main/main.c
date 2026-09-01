@@ -1,13 +1,14 @@
+#include "core/entropy_pool.h"
+#include "core/fw_update.h"
+#include "core/nvs_secure.h"
+#include "core/pbkdf2.h"
 #include "core/pin.h"
 #include "core/settings.h"
-#include "core/wallet.h"
-#include "pages/login/login.h"
-#include "pages/pin/pin_page.h"
-#include "pages/screensaver.h"
+#include "pages/session_lock.h"
 #include "ui/assets/kern_logo_lvgl.h"
+#include "ui/entropy_input.h"
 #include "ui/theme_widgets.h"
 #include "utils/bip39_filter.h"
-#include "utils/session.h"
 #include "video.h"
 #include <bsp/display.h>
 #include <bsp/esp-bsp.h>
@@ -23,48 +24,36 @@
 
 static const char *TAG = "KERN_MAIN";
 
-// ---------------------------------------------------------------------------
-// Session expiry: lock the device and require PIN re-entry
-// ---------------------------------------------------------------------------
-
-static void session_expired_handler(void);
-
-static void post_unlock_cb(void) {
-  pin_page_destroy();
-
-  // Start session timeout
-  uint16_t timeout = pin_get_session_timeout();
-  if (timeout > 0)
-    session_start(timeout);
-
-  login_page_create(lv_screen_active());
-}
-
-static void screensaver_dismissed_cb(void) {
-  pin_page_create(lv_screen_active(), PIN_PAGE_UNLOCK, post_unlock_cb, NULL);
-}
-
-static void session_expired_handler(void) {
-  wallet_unload();
-  lv_obj_clean(lv_screen_active());
-  screensaver_create(lv_screen_active(), screensaver_dismissed_cb);
-}
-
-// ---------------------------------------------------------------------------
-
 void app_main(void) {
-  // Initialize NVS for persistent settings
-  esp_err_t ret = nvs_flash_init();
-  if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
-      ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-    nvs_flash_erase();
-    ret = nvs_flash_init();
-  }
-  ESP_ERROR_CHECK(ret);
-  settings_init();
+  // Seed before anything can ask for randomness
+  entropy_pool_init();
+
+  // Air-gap: hold the Wi-Fi/BT co-processor (ESP32-C6) in reset first.
+  ESP_ERROR_CHECK(bsp_wifi_coproc_disable());
+
+  // Initialize NVS for persistent settings — encrypted if eFuse KEY4 is
+  // provisioned, plaintext otherwise (never stock nvs_flash_init(): its
+  // keygen path would burn KEY4 without consent)
+  ESP_ERROR_CHECK(nvs_secure_init());
+  // Not fatal: every getter falls back to its default when the namespace is
+  // unavailable, and those defaults are the safe ones.
+  esp_err_t settings_ret = settings_init();
+  if (settings_ret != ESP_OK)
+    ESP_LOGE(TAG, "Settings init failed, using defaults: %s",
+             esp_err_to_name(settings_ret));
+
+#ifdef CONFIG_KERN_PBKDF2_SELFTEST
+  // Before the display comes up, so the console is quiet and nothing else is
+  // contending for the SHA and AES peripherals.
+  pbkdf2_selftest();
+#endif
 
   bsp_display_start();
   ESP_LOGI(TAG, "Display initialized successfully");
+
+  bsp_display_lock(0);
+  entropy_input_attach();
+  bsp_display_unlock();
 
   esp_err_t video_ret = app_video_init_once(bsp_i2c_get_handle());
   if (video_ret == ESP_OK) {
@@ -82,12 +71,12 @@ void app_main(void) {
   lv_refr_now(NULL);
   bsp_display_unlock();
 
-  // Initialize PMIC (AXP2101 on wave_35; no-op on wave_4b)
   esp_err_t pmic_ret = bsp_pmic_init();
   if (pmic_ret == ESP_OK) {
-    ESP_LOGI(TAG, "PMIC initialized");
+    ESP_LOGI(TAG, "Battery monitoring initialized");
   } else if (pmic_ret != ESP_ERR_NOT_SUPPORTED) {
-    ESP_LOGW(TAG, "PMIC init failed: %s", esp_err_to_name(pmic_ret));
+    ESP_LOGW(TAG, "Battery monitoring init failed: %s",
+             esp_err_to_name(pmic_ret));
   }
 
   theme_init();
@@ -119,27 +108,30 @@ void app_main(void) {
   }
 
   // Initialize BIP39 wordlist (needed for anti-phishing words)
-  bip39_filter_init();
+  if (!bip39_filter_init())
+    ESP_LOGE(TAG, "BIP39 wordlist init failed");
 
-  // Initialize PIN module
-  pin_init();
-
-  // Set up session expiry callback
-  session_set_expired_callback(session_expired_handler);
+  // Initialize the PIN module. Fail closed: without it pin_is_configured()
+  // reports false, and the boot gate below would walk straight past the PIN
+  // of a device that has one set.
+  ESP_ERROR_CHECK(pin_init());
 
   // Lock display again for modifications
   bsp_display_lock(0);
 
+  // Start inactivity monitoring (screensaver + session lock)
+  session_lock_init();
+
   // Clear the screen
   lv_obj_clean(screen);
 
-  // PIN gate: if PIN is configured, require unlock before login
-  if (pin_is_configured()) {
-    pin_page_create(screen, PIN_PAGE_UNLOCK, post_unlock_cb, NULL);
-  } else {
-    login_page_create(screen);
-  }
+  // PIN gate: unlock page if a PIN is configured, else login
+  session_lock_boot_gate(screen);
 
   // Unlock display
   bsp_display_unlock();
+
+  // Everything initialized and UI up — confirm a freshly installed update so
+  // the bootloader doesn't roll back to the previous slot
+  fw_update_boot_confirm();
 }

@@ -7,7 +7,7 @@
 #include "../../core/wallet.h"
 #include "../../qr/parser.h"
 #include "../../qr/scanner.h"
-#include "../../ui/assets/icons_24.h"
+#include "../../ui/assets/icons.h"
 #include "../../ui/dialog.h"
 #include "../../ui/input_helpers.h"
 #include "../../ui/key_info.h"
@@ -215,12 +215,18 @@ bool descriptor_loader_show_error(descriptor_validation_result_t result) {
     return true;
 
   case VALIDATION_UNSUPPORTED_MINISCRIPT:
-    dialog_show_error_timeout("Only wsh() miniscript is supported", NULL, 3000);
+    dialog_show_error_timeout("Only wsh() and tr() miniscript is supported",
+                              NULL, 3000);
     return true;
 
   case VALIDATION_UNSUPPORTED_SCRIPT:
     dialog_show_error_timeout("Script too large (max 15 multisig keys)", NULL,
                               3000);
+    return true;
+
+  case VALIDATION_TR_INTERNAL_NOT_UNSPENDABLE:
+    dialog_show_error_timeout("Taproot internal key not provably unspendable",
+                              NULL, 3000);
     return true;
 
   case VALIDATION_NETWORK_MISMATCH: {
@@ -563,8 +569,9 @@ static void descriptor_info_confirm_wrapper(const descriptor_info_t *info,
   int32_t scroll_w = lv_obj_get_content_width(scroll);
 
   // Get current wallet fingerprint for highlighting
-  char my_fp[9] = {0};
-  key_get_fingerprint_hex(my_fp);
+  char my_fp[9];
+  if (!key_get_fingerprint_hex(my_fp))
+    my_fp[0] = '\0'; // matches no key, so nothing is highlighted
 
   // Key entries
   for (uint32_t i = 0; i < info->num_keys; i++) {
@@ -589,23 +596,46 @@ static void descriptor_info_confirm_wrapper(const descriptor_info_t *info,
                      LV_COORD_MAX, LV_TEXT_FLAG_NONE);
     int32_t indent = prefix_size.x;
 
-    // Derivation path row (indented), hardened marks shown as 'h'
-    char deriv[64];
-    strncpy(deriv, info->keys[i].derivation, sizeof(deriv) - 1);
-    deriv[sizeof(deriv) - 1] = '\0';
-    for (char *p = deriv; *p; p++)
-      if (*p == '\'')
-        *p = 'h';
-    lv_obj_t *deriv_row = ui_icon_text_row_create(scroll, ICON_DERIVATION,
-                                                  deriv, secondary_color());
-    lv_obj_set_style_pad_left(deriv_row, indent, 0);
+    // Derivation + xpub rows. A bare fixed key (e.g. a NUMS taproot key-path)
+    // has no xpub/derivation — skip the otherwise-blank rows; the note below
+    // explains it instead.
+    if (info->keys[i].xpub[0] != '\0') {
+      // Derivation path row (indented), hardened marks shown as 'h'
+      char deriv[64];
+      strncpy(deriv, info->keys[i].derivation, sizeof(deriv) - 1);
+      deriv[sizeof(deriv) - 1] = '\0';
+      for (char *p = deriv; *p; p++)
+        if (*p == '\'')
+          *p = 'h';
+      lv_obj_t *deriv_row = ui_icon_text_row_create(scroll, ICON_DERIVATION,
+                                                    deriv, secondary_color());
+      lv_obj_set_style_pad_left(deriv_row, indent, 0);
 
-    // Xpub (indented), middle-cropped to fill the remaining width.
-    ui_text_fit_t xpub_fit = ui_text_fit_middle(
-        info->keys[i].xpub, theme_font_small(), scroll_w - indent);
-    lv_obj_t *xpub_row = ui_text_fit_row_create(
-        scroll, &xpub_fit, theme_font_small(), scroll_w, secondary_color());
-    lv_obj_set_style_pad_left(xpub_row, indent, 0);
+      // Xpub (indented), middle-cropped to fill the remaining width.
+      ui_text_fit_t xpub_fit = ui_text_fit_middle(
+          info->keys[i].xpub, theme_font_small(), scroll_w - indent);
+      lv_obj_t *xpub_row = ui_text_fit_row_create(
+          scroll, &xpub_fit, theme_font_small(), scroll_w, secondary_color());
+      lv_obj_set_style_pad_left(xpub_row, indent, 0);
+    }
+
+    // Taproot key-path note on the internal key (A): reassure on a provably
+    // unspendable NUMS point, warn on an external key that can bypass the
+    // script policy with a unilateral key-path spend.
+    if (i == 0 && (info->tr_keypath == TR_KEYPATH_NUMS ||
+                   info->tr_keypath == TR_KEYPATH_EXTERNAL)) {
+      bool external = info->tr_keypath == TR_KEYPATH_EXTERNAL;
+      const char *note =
+          external ? LV_SYMBOL_WARNING " Other key can spend alone"
+                   : "Provably unspendable (NUMS) - no key-path spend";
+      lv_obj_t *note_lbl = theme_create_label(scroll, note, false);
+      lv_obj_set_style_text_font(note_lbl, theme_font_small(), 0);
+      lv_obj_set_style_text_color(
+          note_lbl, external ? discourage_color() : secondary_color(), 0);
+      lv_obj_set_style_pad_left(note_lbl, indent, 0);
+      lv_obj_set_width(note_lbl, scroll_w - indent);
+      lv_label_set_long_mode(note_lbl, LV_LABEL_LONG_WRAP);
+    }
   }
 
   // Indented miniscript policy with key letters, our keys highlighted
@@ -736,9 +766,10 @@ void descriptor_loader_show_source_menu(lv_obj_t *parent, void (*qr_cb)(void),
   if (!source_menu)
     return;
 
-  ui_menu_add_entry(source_menu, "From QR Code", qr_cb);
-  ui_menu_add_entry(source_menu, "From Flash", flash_cb);
-  ui_menu_add_entry(source_menu, "From SD Card", sd_cb);
+  ui_menu_add_entry_with_icon(source_menu, ICON_QR_CODE, "From QR Code", qr_cb);
+  ui_menu_add_entry_with_icon(source_menu, LV_SYMBOL_DRIVE, "From Flash",
+                              flash_cb);
+  ui_menu_add_entry_with_icon(source_menu, ICON_SD_CARD, "From SD Card", sd_cb);
   ui_menu_show(source_menu);
 }
 

@@ -7,6 +7,7 @@
 #include "../../ui/word_selector.h"
 #include "../capture_entropy.h"
 #include <lvgl.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <wally_bip39.h>
@@ -90,7 +91,7 @@ static void show_hash_display(void) {
   cleanup_ui();
 
   char title_text[32];
-  snprintf(title_text, sizeof(title_text), "%d Words - Entropy", total_words);
+  snprintf(title_text, sizeof(title_text), "%d Words - Camera", total_words);
   title_label = theme_create_page_title(entropy_screen, title_text);
 
   back_btn = ui_create_back_button(entropy_screen, hash_back_cb);
@@ -106,7 +107,7 @@ static void show_hash_display(void) {
   for (int i = 0; i < 32; i++) {
     snprintf(hex_hash + i * 2, 3, "%02x", entropy_hash[i]);
   }
-  snprintf(display_text, sizeof(display_text), "SHA256 of snapshot:\n%s",
+  snprintf(display_text, sizeof(display_text), "Snapshot + TRNG digest:\n%s",
            hex_hash);
 
   lv_obj_t *hash_label = lv_label_create(hash_container);

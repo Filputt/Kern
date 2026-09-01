@@ -26,7 +26,7 @@ int main(void) {
   {
     ss_keypath_t kp = {SS_SCRIPT_P2WPKH, 84, 0, 0, 0, 0};
     TEST("account=0 accepted");
-    if (!ss_keypath_is_whitelisted(&kp, false)) {
+    if (!ss_keypath_is_whitelisted(&kp, false, SS_MAX_OUT_ADDR_INDEX)) {
       FAIL("account 0 should be accepted");
     } else {
       PASS();
@@ -35,7 +35,7 @@ int main(void) {
   {
     ss_keypath_t kp = {SS_SCRIPT_P2WPKH, 84, 0, 99, 0, 0};
     TEST("account=99 accepted");
-    if (!ss_keypath_is_whitelisted(&kp, false)) {
+    if (!ss_keypath_is_whitelisted(&kp, false, SS_MAX_OUT_ADDR_INDEX)) {
       FAIL("account 99 should be accepted");
     } else {
       PASS();
@@ -44,7 +44,7 @@ int main(void) {
   {
     ss_keypath_t kp = {SS_SCRIPT_P2WPKH, 84, 0, 100, 0, 0};
     TEST("account=100 rejected");
-    if (ss_keypath_is_whitelisted(&kp, false)) {
+    if (ss_keypath_is_whitelisted(&kp, false, SS_MAX_OUT_ADDR_INDEX)) {
       FAIL("account 100 should be rejected");
     } else {
       PASS();
@@ -56,26 +56,36 @@ int main(void) {
   {
     ss_keypath_t kp = {SS_SCRIPT_P2WPKH, 84, 0, 0, 0, 0};
     TEST("index=0 accepted");
-    if (!ss_keypath_is_whitelisted(&kp, false)) {
+    if (!ss_keypath_is_whitelisted(&kp, false, SS_MAX_OUT_ADDR_INDEX)) {
       FAIL("index 0 should be accepted");
     } else {
       PASS();
     }
   }
   {
-    ss_keypath_t kp = {SS_SCRIPT_P2WPKH, 84, 0, 0, 0, 99};
-    TEST("index=99 accepted");
-    if (!ss_keypath_is_whitelisted(&kp, false)) {
-      FAIL("index 99 should be accepted");
+    ss_keypath_t kp = {SS_SCRIPT_P2WPKH,         84, 0, 0, 0,
+                       SS_MAX_OUT_ADDR_INDEX - 1};
+    TEST("index=SS_MAX_OUT_ADDR_INDEX-1 accepted");
+    if (!ss_keypath_is_whitelisted(&kp, false, SS_MAX_OUT_ADDR_INDEX)) {
+      FAIL("index SS_MAX_OUT_ADDR_INDEX-1 should be accepted");
     } else {
       PASS();
     }
   }
   {
-    ss_keypath_t kp = {SS_SCRIPT_P2WPKH, 84, 0, 0, 0, 100};
-    TEST("index=100 rejected");
-    if (ss_keypath_is_whitelisted(&kp, false)) {
-      FAIL("index 100 should be rejected");
+    ss_keypath_t kp = {SS_SCRIPT_P2WPKH, 84, 0, 0, 0, SS_MAX_OUT_ADDR_INDEX};
+    TEST("index=SS_MAX_OUT_ADDR_INDEX rejected");
+    if (ss_keypath_is_whitelisted(&kp, false, SS_MAX_OUT_ADDR_INDEX)) {
+      FAIL("index SS_MAX_OUT_ADDR_INDEX should be rejected");
+    } else {
+      PASS();
+    }
+  }
+  {
+    ss_keypath_t kp = {SS_SCRIPT_P2WPKH, 84, 0, 0, 0, SS_MAX_OUT_ADDR_INDEX};
+    TEST("index=SS_MAX_OUT_ADDR_INDEX accepted when uncapped");
+    if (!ss_keypath_is_whitelisted(&kp, false, SS_ADDR_INDEX_UNCAPPED)) {
+      FAIL("index SS_MAX_OUT_ADDR_INDEX should be accepted when uncapped");
     } else {
       PASS();
     }
@@ -86,7 +96,7 @@ int main(void) {
   {
     ss_keypath_t kp = {SS_SCRIPT_P2WPKH, 84, 0, 0, 0, 0};
     TEST("coin=0 accepted on mainnet");
-    if (!ss_keypath_is_whitelisted(&kp, false)) {
+    if (!ss_keypath_is_whitelisted(&kp, false, SS_MAX_OUT_ADDR_INDEX)) {
       FAIL("coin 0 should be accepted on mainnet");
     } else {
       PASS();
@@ -95,7 +105,7 @@ int main(void) {
   {
     ss_keypath_t kp = {SS_SCRIPT_P2WPKH, 84, 1, 0, 0, 0};
     TEST("coin=1 rejected on mainnet");
-    if (ss_keypath_is_whitelisted(&kp, false)) {
+    if (ss_keypath_is_whitelisted(&kp, false, SS_MAX_OUT_ADDR_INDEX)) {
       FAIL("coin 1 should be rejected on mainnet");
     } else {
       PASS();
@@ -104,7 +114,7 @@ int main(void) {
   {
     ss_keypath_t kp = {SS_SCRIPT_P2WPKH, 84, 1, 0, 0, 0};
     TEST("coin=1 accepted on testnet");
-    if (!ss_keypath_is_whitelisted(&kp, true)) {
+    if (!ss_keypath_is_whitelisted(&kp, true, SS_MAX_OUT_ADDR_INDEX)) {
       FAIL("coin 1 should be accepted on testnet");
     } else {
       PASS();
@@ -113,7 +123,7 @@ int main(void) {
   {
     ss_keypath_t kp = {SS_SCRIPT_P2WPKH, 84, 0, 0, 0, 0};
     TEST("coin=0 rejected on testnet");
-    if (ss_keypath_is_whitelisted(&kp, true)) {
+    if (ss_keypath_is_whitelisted(&kp, true, SS_MAX_OUT_ADDR_INDEX)) {
       FAIL("coin 0 should be rejected on testnet");
     } else {
       PASS();
@@ -125,7 +135,7 @@ int main(void) {
   {
     ss_keypath_t kp = {SS_SCRIPT_P2WPKH, 84, 0, 0, 0, 0};
     TEST("chain=0 accepted");
-    if (!ss_keypath_is_whitelisted(&kp, false)) {
+    if (!ss_keypath_is_whitelisted(&kp, false, SS_MAX_OUT_ADDR_INDEX)) {
       FAIL("chain 0 should be accepted");
     } else {
       PASS();
@@ -134,7 +144,7 @@ int main(void) {
   {
     ss_keypath_t kp = {SS_SCRIPT_P2WPKH, 84, 0, 0, 1, 0};
     TEST("chain=1 accepted");
-    if (!ss_keypath_is_whitelisted(&kp, false)) {
+    if (!ss_keypath_is_whitelisted(&kp, false, SS_MAX_OUT_ADDR_INDEX)) {
       FAIL("chain 1 should be accepted");
     } else {
       PASS();
@@ -143,7 +153,7 @@ int main(void) {
   {
     ss_keypath_t kp = {SS_SCRIPT_P2WPKH, 84, 0, 0, 2, 0};
     TEST("chain=2 rejected");
-    if (ss_keypath_is_whitelisted(&kp, false)) {
+    if (ss_keypath_is_whitelisted(&kp, false, SS_MAX_OUT_ADDR_INDEX)) {
       FAIL("chain 2 should be rejected");
     } else {
       PASS();
@@ -155,7 +165,7 @@ int main(void) {
   {
     ss_keypath_t kp = {SS_SCRIPT_P2PKH, 44, 0, 0, 0, 0};
     TEST("purpose=44 accepted");
-    if (!ss_keypath_is_whitelisted(&kp, false)) {
+    if (!ss_keypath_is_whitelisted(&kp, false, SS_MAX_OUT_ADDR_INDEX)) {
       FAIL("purpose 44 should be accepted");
     } else {
       PASS();
@@ -164,7 +174,7 @@ int main(void) {
   {
     ss_keypath_t kp = {SS_SCRIPT_P2SH_P2WPKH, 49, 0, 0, 0, 0};
     TEST("purpose=49 accepted");
-    if (!ss_keypath_is_whitelisted(&kp, false)) {
+    if (!ss_keypath_is_whitelisted(&kp, false, SS_MAX_OUT_ADDR_INDEX)) {
       FAIL("purpose 49 should be accepted");
     } else {
       PASS();
@@ -173,7 +183,7 @@ int main(void) {
   {
     ss_keypath_t kp = {SS_SCRIPT_P2WPKH, 84, 0, 0, 0, 0};
     TEST("purpose=84 accepted");
-    if (!ss_keypath_is_whitelisted(&kp, false)) {
+    if (!ss_keypath_is_whitelisted(&kp, false, SS_MAX_OUT_ADDR_INDEX)) {
       FAIL("purpose 84 should be accepted");
     } else {
       PASS();
@@ -182,7 +192,7 @@ int main(void) {
   {
     ss_keypath_t kp = {SS_SCRIPT_P2TR, 86, 0, 0, 0, 0};
     TEST("purpose=86 accepted");
-    if (!ss_keypath_is_whitelisted(&kp, false)) {
+    if (!ss_keypath_is_whitelisted(&kp, false, SS_MAX_OUT_ADDR_INDEX)) {
       FAIL("purpose 86 should be accepted");
     } else {
       PASS();
