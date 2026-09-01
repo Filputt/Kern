@@ -14,6 +14,10 @@ _check_board board:
 
 build board="wave_4b": (_check_board board)
     #!/usr/bin/env sh
+    # Without this a failed build still exits 0: the recipe would carry on to the
+    # cp below, which succeeds because cmake writes compile_commands.json at
+    # configure time, and just reports the recipe's last exit status.
+    set -e
     command -v idf.py >/dev/null || . $IDF_PATH/export.sh
     idf.py -B build_{{board}} -D SDKCONFIG=build_{{board}}/sdkconfig -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.{{board}}' build
     cp ./build_{{board}}/compile_commands.json ./compile_commands.json
@@ -28,6 +32,12 @@ monitor board="wave_4b": (_check_board board)
     command -v idf.py >/dev/null || . $IDF_PATH/export.sh
     idf.py -B build_{{board}} -D SDKCONFIG=build_{{board}}/sdkconfig monitor
 
+# Build with the PBKDF2 accelerator and its on-device check, then watch it run
+pbkdf2-check board="wave_4b": (_check_board board)
+    #!/usr/bin/env sh
+    command -v idf.py >/dev/null || . $IDF_PATH/export.sh
+    idf.py -B build_pbkdf2_{{board}} -D SDKCONFIG=build_pbkdf2_{{board}}/sdkconfig -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.{{board}};sdkconfig.pbkdf2check' flash monitor
+
 format:
     ./scripts/format.sh
 
@@ -36,11 +46,13 @@ test:
 
 clean:
     rm -fRd build build_wave_4b build_wave_35 build_wave_5 build_wave_43 build_crowpanel build_wave_7b
+    rm -fRd build_pbkdf2_*
     rm -f sdkconfig
     rm -fRd compile_commands.json
     rm -fRd .cache/
     rm -rf simulator/build
     make -C components/bbqr/test clean
+    make -C main/qr/test clean
     make -C main/core/test clean
 
 # Stages branding and any locally built firmware into site/ the same way the

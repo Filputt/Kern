@@ -1,6 +1,7 @@
 #include "core/entropy_pool.h"
 #include "core/fw_update.h"
 #include "core/nvs_secure.h"
+#include "core/pbkdf2.h"
 #include "core/pin.h"
 #include "core/settings.h"
 #include "pages/session_lock.h"
@@ -41,6 +42,12 @@ void app_main(void) {
     ESP_LOGE(TAG, "Settings init failed, using defaults: %s",
              esp_err_to_name(settings_ret));
 
+#ifdef CONFIG_KERN_PBKDF2_SELFTEST
+  // Before the display comes up, so the console is quiet and nothing else is
+  // contending for the SHA and AES peripherals.
+  pbkdf2_selftest();
+#endif
+
   bsp_display_start();
   ESP_LOGI(TAG, "Display initialized successfully");
 
@@ -64,12 +71,12 @@ void app_main(void) {
   lv_refr_now(NULL);
   bsp_display_unlock();
 
-  // Initialize PMIC (AXP2101 on wave_35; no-op on wave_4b)
   esp_err_t pmic_ret = bsp_pmic_init();
   if (pmic_ret == ESP_OK) {
-    ESP_LOGI(TAG, "PMIC initialized");
+    ESP_LOGI(TAG, "Battery monitoring initialized");
   } else if (pmic_ret != ESP_ERR_NOT_SUPPORTED) {
-    ESP_LOGW(TAG, "PMIC init failed: %s", esp_err_to_name(pmic_ret));
+    ESP_LOGW(TAG, "Battery monitoring init failed: %s",
+             esp_err_to_name(pmic_ret));
   }
 
   theme_init();

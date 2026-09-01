@@ -622,7 +622,12 @@ static void update_decode_roi(qr_decode_roi_t *roi,
   roi->height = target_side;
 }
 
-static const char *ur_failure_message(QRPartParser *parser) {
+static const char *scan_failure_message(QRPartParser *parser) {
+  if (parser && parser->alloc_failed) {
+    ESP_LOGE(TAG, "QR scan aborted: allocation failure while storing parts");
+    return "QR scan failed: out of memory";
+  }
+
   if (!parser || parser->format != FORMAT_UR || !parser->ur_decoder)
     return "Invalid QR sequence";
 
@@ -763,7 +768,7 @@ static void qr_decode_task(void *pvParameters) {
           }
 
           if (qr_parser_is_failed(qr_parser)) {
-            scan_failure_msg = ur_failure_message(qr_parser);
+            scan_failure_msg = scan_failure_message(qr_parser);
             scan_failed = true;
             break;
           }
