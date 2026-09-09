@@ -165,6 +165,7 @@ set(APP_UTIL_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/utils/dice_quality.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/utils/estimated_entropy.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/utils/session.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../main/utils/utf8.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../main/utils/worker_task.c
 )
 
@@ -310,6 +311,7 @@ set(APP_PAGE_SOURCES
     ${APP_PAGES_DIR}/shared/mnemonic_editor.c
     ${APP_PAGES_DIR}/shared/sd_file_browser.c
     ${APP_PAGES_DIR}/shared/storage_browser.c
+    ${APP_PAGES_DIR}/shared/text_input_scan.c
     ${APP_PAGES_DIR}/shared/wipe_flash_dialog.c
     # Top-level pages
     ${APP_PAGES_DIR}/capture_entropy.c
@@ -322,6 +324,11 @@ set(APP_PAGE_SOURCES
     ${APP_PAGES_DIR}/store_mnemonic.c
     # Scan page
     ${APP_PAGES_DIR}/scan/scan.c
+    ${APP_PAGES_DIR}/scan/scan_handlers.c
+    ${APP_PAGES_DIR}/scan/scan_message_sign.c
+    ${APP_PAGES_DIR}/scan/scan_psbt_review.c
+    ${APP_PAGES_DIR}/scan/scan_psbt_sign.c
+    ${APP_PAGES_DIR}/scan/scan_review_widgets.c
     ${APP_PAGES_DIR}/scan/psbt_sign_policy.c
     # Load page
     ${APP_PAGES_DIR}/load/load.c

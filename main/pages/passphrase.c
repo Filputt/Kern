@@ -5,6 +5,7 @@
 #include "../ui/input_helpers.h"
 #include "../ui/theme_widgets.h"
 #include "../utils/secure_mem.h"
+#include "shared/text_input_scan.h"
 #include <lvgl.h>
 #include <stdio.h>
 
@@ -31,6 +32,13 @@ static void confirm_passphrase_cb(bool result, void *user_data) {
     success_callback(lv_textarea_get_text(text_input.textarea));
 }
 
+static void scan_key_cb(void *user_data) {
+  (void)user_data;
+  text_input_scan_cfg_t cfg = {&text_input, passphrase_page_hide,
+                               passphrase_page_show, NULL};
+  text_input_scan_start(&cfg);
+}
+
 static void keyboard_ready_cb(lv_event_t *e) {
   (void)e;
 
@@ -55,8 +63,8 @@ static void keyboard_ready_cb(lv_event_t *e) {
 
   char prompt[128];
   snprintf(prompt, sizeof(prompt),
-           "Confirm passphrase?\n\n" ICON_FINGERPRINT
-           " %s > #%06X " ICON_FINGERPRINT " %s#",
+           "Confirm passphrase?\n\n" ICON_FINGERPRINT " %s\n" LV_SYMBOL_DOWN
+           "\n#%06X " ICON_FINGERPRINT " %s#",
            before_hex, (unsigned)highlight, after_hex);
   dialog_show_confirm(prompt, confirm_passphrase_cb, NULL,
                       DIALOG_STYLE_OVERLAY);
@@ -80,6 +88,7 @@ void passphrase_page_create(lv_obj_t *parent, void (*return_cb)(void),
   // Text input (textarea + keyboard), masked with an eye toggle to reveal
   ui_text_input_create(&text_input, passphrase_screen, "passphrase", true,
                        keyboard_ready_cb);
+  ui_text_input_enable_scan(&text_input, scan_key_cb, NULL);
 }
 
 void passphrase_page_show(void) {
