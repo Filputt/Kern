@@ -1344,6 +1344,81 @@ static void test_amount_audit_mixed(void) {
   wally_tx_free(prev);
 }
 
+static void test_fee_trust_by_input_count(void) {
+  TEST("psbt_fee_is_trusted: one asserted input trusted, two not, invalid "
+       "never");
+
+  struct wally_tx *prev = NULL;
+  struct wally_psbt *psbt =
+      make_amount_psbt(REF_SPK_P2WPKH, sizeof(REF_SPK_P2WPKH), 100000, &prev);
+  if (!psbt) {
+    FAIL("make_amount_psbt");
+    return;
+  }
+
+  psbt_amount_audit_t audit;
+  psbt_audit_input_amounts(psbt, &audit);
+  if (psbt_fee_is_trusted(&audit)) {
+    FAIL("single missing input trusted");
+    goto done;
+  }
+
+  set_witness_value(psbt, 100000);
+  psbt_audit_input_amounts(psbt, &audit);
+  if (audit.asserted != 1 || !psbt_fee_is_trusted(&audit)) {
+    FAIL("single asserted input not trusted");
+    goto done;
+  }
+
+  struct wally_tx *tx = NULL;
+  wally_psbt_get_global_tx_alloc(psbt, &tx);
+  uint8_t other_txid[32] = {0};
+  other_txid[0] = 0x77;
+  wally_tx_add_raw_input(tx, other_txid, sizeof(other_txid), 0, 0xffffffff,
+                         NULL, 0, NULL, 0);
+  struct wally_psbt *two = NULL;
+  wally_psbt_from_tx(tx, 0, 0, &two);
+  wally_tx_free(tx);
+  if (!two) {
+    FAIL("two-input rebuild");
+    goto done;
+  }
+  struct wally_tx_output *utxo = NULL;
+  wally_tx_output_init_alloc(100000, REF_SPK_P2WPKH, sizeof(REF_SPK_P2WPKH),
+                             &utxo);
+  wally_psbt_set_input_witness_utxo(two, 0, utxo);
+  wally_psbt_set_input_witness_utxo(two, 1, utxo);
+  wally_tx_output_free(utxo);
+
+  psbt_audit_input_amounts(two, &audit);
+  if (audit.asserted != 2 || psbt_fee_is_trusted(&audit)) {
+    FAIL("two asserted inputs trusted");
+    wally_psbt_free(two);
+    goto done;
+  }
+
+  wally_psbt_set_input_utxo(two, 0, prev);
+  psbt_audit_input_amounts(two, &audit);
+  if (audit.proven != 1 || psbt_fee_is_trusted(&audit)) {
+    FAIL("one proven of two trusted");
+    wally_psbt_free(two);
+    goto done;
+  }
+  wally_psbt_free(two);
+
+  wally_psbt_set_input_utxo(psbt, 0, prev);
+  set_witness_value(psbt, 1000);
+  psbt_audit_input_amounts(psbt, &audit);
+  if (audit.invalid != 1 || psbt_fee_is_trusted(&audit))
+    FAIL("single invalid input trusted");
+  else
+    PASS();
+
+done:
+  wally_psbt_free(psbt);
+  wally_tx_free(prev);
+}
+
 /* ================================================================
  * Sighash and fee-percentage tests
  * ================================================================ */
@@ -1773,35 +1848,148 @@ static void test_tx_alloc_rejects_bad_amount(void) {
   wally_psbt_free(psbt);
 }
 
-/* Trim rebuilds from a transaction, which can only produce v0. Declining is
- * what keeps a v2 export from being silently downgraded or having its
- * signer-set flags rewritten by an upgrade. */
-static void test_trim_declines_psbt_v2(void) {
-  TEST("psbt_trim: declines a v2 PSBT so it exports untrimmed");
+/* The previous transactions are what a PSBT weighs, and the coordinator that
+ * sent them needs none of them back. */
+static void test_trim_leaves_out_previous_transactions(void) {
+  TEST("psbt_trim: previous transactions are not sent back");
 
-  struct wally_psbt *psbt = make_safe_psbt();
+  struct wally_tx *prev = NULL;
+  struct wally_psbt *psbt =
+      make_amount_psbt(REF_SPK_P2WPKH, sizeof(REF_SPK_P2WPKH), 100000, &prev);
   if (!psbt) {
-    FAIL("make_safe_psbt");
+    FAIL("make_amount_psbt");
     return;
   }
+  wally_psbt_set_input_utxo(psbt, 0, prev);
+  set_witness_value(psbt, 100000);
 
   struct wally_psbt *trimmed = psbt_trim(psbt);
-  if (!trimmed) {
-    FAIL("v0 PSBT should trim");
-    wally_psbt_free(psbt);
-    return;
+  struct wally_tx *utxo = NULL;
+  struct wally_tx_output *witness_utxo = NULL;
+  size_t full_len = 0, trimmed_len = 0, prev_len = 0;
+  if (trimmed) {
+    wally_psbt_get_input_utxo_alloc(trimmed, 0, &utxo);
+    wally_psbt_get_input_witness_utxo_alloc(trimmed, 0, &witness_utxo);
+    wally_psbt_get_length(psbt, 0, &full_len);
+    wally_psbt_get_length(trimmed, 0, &trimmed_len);
+    wally_tx_get_length(prev, WALLY_TX_FLAG_USE_WITNESS, &prev_len);
   }
-  wally_psbt_free(trimmed);
 
-  if (wally_psbt_set_version(psbt, 0, WALLY_PSBT_VERSION_2) != WALLY_OK)
-    FAIL("could not convert the fixture to v2");
-  else if ((trimmed = psbt_trim(psbt)) != NULL) {
-    FAIL("v2 PSBT must not be trimmed");
-    wally_psbt_free(trimmed);
-  } else
+  if (!trimmed)
+    FAIL("psbt_trim");
+  else if (utxo)
+    FAIL("the previous transaction came back");
+  else if (!witness_utxo || witness_utxo->satoshi != 100000)
+    FAIL("the witness_utxo did not");
+  else if (prev_len == 0 || trimmed_len + prev_len > full_len)
+    FAIL("the payload did not shrink by the previous transaction");
+  else
     PASS();
 
+  wally_tx_free(utxo);
+  wally_tx_output_free(witness_utxo);
+  wally_psbt_free(trimmed);
   wally_psbt_free(psbt);
+  wally_tx_free(prev);
+}
+
+/* A v2 PSBT cannot be rebuilt from a transaction, so a copy is trimmed in
+ * place. It must stay v2, keep the flags the signer set and every signature,
+ * and still describe the same transaction, or the coordinator cannot merge it.
+ */
+static void test_trim_psbt_v2_in_place(void) {
+  TEST("psbt_trim: a v2 PSBT is trimmed in place");
+
+  /* An input as a coordinator sends it: both UTXO forms and the key's origin.
+   * v2 needs a real previous txid, which make_safe_psbt() does not have. */
+  struct wally_tx *prev = NULL;
+  struct ext_key *derived = NULL;
+  struct wally_psbt *psbt =
+      make_amount_psbt(REF_SPK_P2WPKH, sizeof(REF_SPK_P2WPKH), 100000, &prev);
+  if (!psbt || !key_get_derived_key("m/84'/0'/0'/0/0", &derived)) {
+    FAIL("fixture");
+    wally_psbt_free(psbt);
+    wally_tx_free(prev);
+    return;
+  }
+  uint8_t origin[] = {
+      0x00, 0x00, 0x00, 0x00, /* fp = 00000000 (stub) */
+      0x54, 0x00, 0x00, 0x80, /* 84' */
+      0x00, 0x00, 0x00, 0x80, /* 0'  */
+      0x00, 0x00, 0x00, 0x80, /* 0'  */
+      0x00, 0x00, 0x00, 0x00, /* 0 (chain) */
+      0x00, 0x00, 0x00, 0x00, /* 0 (index) */
+  };
+  uint8_t internal_key[32] = {0x02};
+  wally_psbt_set_input_utxo(psbt, 0, prev);
+  set_witness_value(psbt, 100000);
+  wally_map_add(&psbt->inputs[0].keypaths, derived->pub_key,
+                sizeof(derived->pub_key), origin, sizeof(origin));
+  wally_psbt_set_input_taproot_internal_key(psbt, 0, internal_key,
+                                            sizeof(internal_key));
+  bip32_key_free(derived);
+
+  if (wally_psbt_set_version(psbt, 0, WALLY_PSBT_VERSION_2) != WALLY_OK) {
+    FAIL("could not convert the fixture to v2");
+    wally_psbt_free(psbt);
+    wally_tx_free(prev);
+    return;
+  }
+  psbt_sign_policy_t policy = {0};
+  size_t added = psbt_sign(psbt, false, policy, NULL);
+  wally_psbt_set_tx_modifiable_flags(psbt, WALLY_PSBT_TXMOD_INPUTS);
+
+  struct wally_psbt *trimmed = psbt_trim(psbt);
+  struct wally_psbt *reparsed = NULL;
+  char *base64 = NULL;
+  uint8_t id[32] = {0}, trimmed_id[32] = {1};
+  size_t version = 0, flags = 0, key_len = 1;
+  size_t full_len = 0, trimmed_len = 0, prev_len = 0;
+  if (trimmed) {
+    wally_psbt_get_version(trimmed, &version);
+    wally_psbt_get_tx_modifiable_flags(trimmed, &flags);
+    wally_psbt_get_id(psbt, 0, id, sizeof(id));
+    wally_psbt_get_id(trimmed, 0, trimmed_id, sizeof(trimmed_id));
+    wally_psbt_get_input_taproot_internal_key_len(trimmed, 0, &key_len);
+    wally_psbt_get_length(psbt, 0, &full_len);
+    wally_psbt_get_length(trimmed, 0, &trimmed_len);
+    wally_tx_get_length(prev, WALLY_TX_FLAG_USE_WITNESS, &prev_len);
+    if (wally_psbt_to_base64(trimmed, 0, &base64) == WALLY_OK)
+      wally_psbt_from_base64(base64, 0, &reparsed);
+  }
+
+  if (added == 0)
+    FAIL("the fixture did not sign");
+  else if (!trimmed)
+    FAIL("a v2 PSBT must trim");
+  else if (version != WALLY_PSBT_VERSION_2)
+    FAIL("the export was downgraded");
+  else if (flags != WALLY_PSBT_TXMOD_INPUTS)
+    FAIL("the tx-modifiable flags were rewritten");
+  else if (memcmp(id, trimmed_id, sizeof(id)) != 0)
+    FAIL("it no longer describes the same transaction");
+  else if (trimmed->inputs[0].signatures.num_items !=
+               psbt->inputs[0].signatures.num_items ||
+           trimmed->inputs[0].signatures.num_items == 0)
+    FAIL("a signature was lost");
+  else if (!trimmed->inputs[0].witness_utxo)
+    FAIL("the witness_utxo was lost");
+  else if (trimmed->inputs[0].utxo)
+    FAIL("the previous transaction came back");
+  else if (trimmed->inputs[0].keypaths.num_items != 0 || key_len != 0)
+    FAIL("key origins came back");
+  else if (prev_len == 0 || trimmed_len + prev_len > full_len)
+    FAIL("the payload did not shrink by the previous transaction");
+  else if (!reparsed)
+    FAIL("the trimmed PSBT does not parse");
+  else
+    PASS();
+
+  wally_psbt_free(reparsed);
+  wally_free_string(base64);
+  wally_psbt_free(trimmed);
+  wally_psbt_free(psbt);
+  wally_tx_free(prev);
 }
 
 /* ================================================================
@@ -2589,6 +2777,7 @@ int main(void) {
   test_amount_fabricated_prev_tx();
   test_amount_understated_witness_loses();
   test_amount_audit_mixed();
+  test_fee_trust_by_input_count();
 
   printf("\n=== sighash and fee tests ===\n\n");
 
@@ -2618,7 +2807,8 @@ int main(void) {
   test_sign_clears_tx_modifiable();
   test_sign_counts_reused_address();
   test_tx_alloc_rejects_bad_amount();
-  test_trim_declines_psbt_v2();
+  test_trim_leaves_out_previous_transactions();
+  test_trim_psbt_v2_in_place();
 
   key_unload();
 
