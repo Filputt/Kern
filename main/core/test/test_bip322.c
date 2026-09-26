@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "core/message_sign.h"
 #include <wally_core.h>
 #include <wally_crypto.h>
 #include <wally_map.h>
@@ -12,6 +11,7 @@
 #include <wally_transaction.h>
 
 #include "core/bip322.h"
+#include "core/message_sign.h"
 #include "core/psbt.h"
 #include "core/script_templates.h"
 
@@ -103,17 +103,11 @@ static struct wally_psbt *request_for_message(const unsigned char *msg,
       wally_tx_get_txid(to_spend, psbt->tx->inputs[0].txhash, 32) != WALLY_OK)
     goto fail;
   wally_tx_free(to_spend);
-  /* The fixture's sole unknown global field is the signed message. */
-  struct wally_map_item *item = &psbt->unknowns.items[0];
-  unsigned char *value = malloc(len);
-  if (!value) {
-    wally_psbt_free(psbt);
-    return NULL;
-  }
-  memcpy(value, msg, len);
-  free(item->value);
-  item->value = value;
-  item->value_len = len;
+  to_spend = NULL;
+  static const unsigned char message_key[] = {0x09};
+  if (wally_map_replace(&psbt->unknowns, message_key, sizeof(message_key), msg,
+                        len) != WALLY_OK)
+    goto fail;
   return psbt;
 fail:
   wally_tx_free(to_spend);
