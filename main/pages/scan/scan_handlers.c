@@ -136,7 +136,7 @@ void scan_handle_mnemonic(const char *data, size_t len) {
   snprintf(msg, sizeof(msg),
            "Replace current key?\n\n" ICON_FINGERPRINT " %s\n" LV_SYMBOL_DOWN
            "\n#%06X " ICON_FINGERPRINT " %s#\n\n"
-           "Passphrase and descriptors will be discarded.",
+           "Passphrase and unregistered descriptors will be discarded.",
            current_fp, (unsigned)highlight, new_fp);
 
   dialog_show_confirm(msg, mnemonic_confirm_cb, NULL, DIALOG_STYLE_FULLSCREEN);
