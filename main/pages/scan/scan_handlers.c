@@ -3,6 +3,7 @@
  */
 
 #include "../../core/key.h"
+#include "../../core/registry.h"
 #include "../../core/wallet.h"
 #include "../../qr/encoder.h"
 #include "../../ui/assets/icons.h"
@@ -94,6 +95,8 @@ static void mnemonic_confirm_cb(bool confirmed, void *user_data) {
                               0);
     return;
   }
+
+  registry_init(net == WALLET_NETWORK_TESTNET);
 
   SECURE_FREE_STRING(scan_ctx.scanned_mnemonic);
 
