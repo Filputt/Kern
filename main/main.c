@@ -1,3 +1,4 @@
+#include "bus_timeout.h"
 #include "core/entropy_pool.h"
 #include "core/fw_update.h"
 #include "core/nvs_secure.h"
@@ -25,6 +26,8 @@
 static const char *TAG = "KERN_MAIN";
 
 void app_main(void) {
+  bus_timeout_disable();
+
   // Seed before anything can ask for randomness
   entropy_pool_init();
 
@@ -79,8 +82,8 @@ void app_main(void) {
              esp_err_to_name(pmic_ret));
   }
 
-  theme_init();
   bsp_display_lock(0);
+  theme_init();
 
   // Set up screen theme background
   theme_apply_screen(screen);

@@ -3,21 +3,9 @@
 #include "../../components/cUR/src/ur_decoder.h"
 #include <ctype.h>
 #include <limits.h>
-#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-// QR capacity arrays (limited to version 20)
-static const int QR_CAPACITY_BYTE[] = {17,  32,  53,  78,  106, 134, 154,
-                                       192, 230, 271, 321, 367, 425, 458,
-                                       520, 586, 644, 718, 792, 858};
-
-static const int QR_CAPACITY_ALPHANUMERIC[] = {
-    25,  47,  77,  114, 154, 195, 224, 279,  335,  395,
-    468, 535, 619, 667, 758, 854, 938, 1046, 1153, 1249};
-
-#define QR_CAPACITY_SIZE 20
 
 // Helper function prototypes
 static int detect_format(const char *data, size_t data_len, BBQrCode **bbqr);
@@ -25,9 +13,6 @@ static bool parse_pmofn_qr_part(const char *data, size_t data_len,
                                 const char **part, size_t *part_len, int *index,
                                 int *total);
 static bool starts_with_case_insensitive(const char *str, const char *prefix);
-static int max_qr_bytes(int max_width, const char *encoding);
-static void find_min_num_parts(const char *data, size_t data_len, int max_width,
-                               int qr_format, int *num_parts, int *part_size);
 static bool add_part(QRPartParser *parser, int index, const char *data,
                      size_t data_len);
 static int compare_parts(const void *a, const void *b);
@@ -101,31 +86,6 @@ void qr_parser_destroy(QRPartParser *parser) {
   free(parser);
 }
 
-int qr_parser_parsed_count(QRPartParser *parser) {
-  if (parser->format == FORMAT_UR && parser->ur_decoder) {
-    ur_decoder_t *decoder = (ur_decoder_t *)parser->ur_decoder;
-    return (int)ur_decoder_processed_parts_count(decoder);
-  }
-  return parser->parts_count;
-}
-
-int qr_parser_processed_parts_count(QRPartParser *parser) {
-  if (parser->format == FORMAT_UR && parser->ur_decoder) {
-    ur_decoder_t *decoder = (ur_decoder_t *)parser->ur_decoder;
-    return (int)ur_decoder_processed_parts_count(decoder);
-  }
-  return parser->parts_count;
-}
-
-int qr_parser_total_count(QRPartParser *parser) {
-  if (parser->format == FORMAT_UR && parser->ur_decoder) {
-    ur_decoder_t *decoder = (ur_decoder_t *)parser->ur_decoder;
-    size_t expected = ur_decoder_expected_part_count(decoder);
-    return expected > 0 ? (int)expected : 1;
-  }
-  return parser->total;
-}
-
 static bool add_part(QRPartParser *parser, int index, const char *data,
                      size_t data_len) {
   // Check if part already exists
@@ -193,10 +153,6 @@ static bool add_part(QRPartParser *parser, int index, const char *data,
   parser->parts[parser->parts_count++] = part;
   parser->stored_bytes += data_len;
   return true;
-}
-
-int qr_parser_parse(QRPartParser *parser, const char *data) {
-  return qr_parser_parse_with_len(parser, data, strlen(data));
 }
 
 int qr_parser_parse_with_len(QRPartParser *parser, const char *data,
@@ -479,70 +435,6 @@ static bool parse_pmofn_qr_part(const char *data, size_t data_len,
   return true;
 }
 
-static int max_qr_bytes(int max_width, const char *encoding) {
-  max_width -= 2; // Subtract frame width
-  int qr_version = (max_width - 17) / 4;
-
-  if (qr_version < 1)
-    qr_version = 1;
-  if (qr_version > QR_CAPACITY_SIZE)
-    qr_version = QR_CAPACITY_SIZE;
-
-  const int *capacity_list = (strcmp(encoding, "alphanumeric") == 0)
-                                 ? QR_CAPACITY_ALPHANUMERIC
-                                 : QR_CAPACITY_BYTE;
-
-  return capacity_list[qr_version - 1];
-}
-
-static void find_min_num_parts(const char *data, size_t data_len, int max_width,
-                               int qr_format, int *num_parts, int *part_size) {
-  const char *encoding = (qr_format == FORMAT_BBQR) ? "alphanumeric" : "byte";
-  int qr_capacity = max_qr_bytes(max_width, encoding);
-
-  if (qr_format == FORMAT_PMOFN) {
-    int ps = qr_capacity - PMOFN_PREFIX_LENGTH_1D;
-    *num_parts = (data_len + ps - 1) / ps;
-
-    if (*num_parts > 9) {
-      ps = qr_capacity - PMOFN_PREFIX_LENGTH_2D;
-      *num_parts = (data_len + ps - 1) / ps;
-    }
-
-    *part_size = (data_len + *num_parts - 1) / *num_parts;
-  } else if (qr_format == FORMAT_UR) {
-    qr_capacity -= UR_GENERIC_PREFIX_LENGTH;
-    qr_capacity -= (UR_CBOR_PREFIX_LEN + UR_BYTEWORDS_CRC_LEN) * 2;
-    qr_capacity = (qr_capacity > UR_MIN_FRAGMENT_LENGTH)
-                      ? qr_capacity
-                      : UR_MIN_FRAGMENT_LENGTH;
-
-    size_t adjusted_len = data_len * 2; // Bytewords encoding doubles length
-    *num_parts = (adjusted_len + qr_capacity - 1) / qr_capacity;
-    *part_size = data_len / *num_parts;
-    *part_size = (*part_size > UR_MIN_FRAGMENT_LENGTH) ? *part_size
-                                                       : UR_MIN_FRAGMENT_LENGTH;
-  } else if (qr_format == FORMAT_BBQR) {
-    int max_part_size = qr_capacity - BBQR_PREFIX_LENGTH;
-    if ((int)data_len < max_part_size) {
-      *num_parts = 1;
-      *part_size = data_len;
-      return;
-    }
-
-    max_part_size = (max_part_size / 8) * 8;
-    *num_parts = (data_len + max_part_size - 1) / max_part_size;
-    *part_size = data_len / *num_parts;
-    *part_size = ((*part_size + 7) / 8) * 8;
-
-    if (*part_size > max_part_size) {
-      (*num_parts)++;
-      *part_size = data_len / *num_parts;
-      *part_size = ((*part_size + 7) / 8) * 8;
-    }
-  }
-}
-
 bool qr_parser_get_ur_result(QRPartParser *parser, const char **ur_type_out,
                              const uint8_t **cbor_data_out,
                              size_t *cbor_len_out) {
@@ -585,10 +477,4 @@ char qr_parser_get_bbqr_file_type(QRPartParser *parser) {
     return parser->bbqr->file_type;
   }
   return 0;
-}
-
-int get_qr_size(const char *qr_code) {
-  int len = strlen(qr_code);
-  int size = (int)sqrt(len * 8);
-  return size;
 }
